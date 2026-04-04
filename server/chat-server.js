@@ -38,9 +38,39 @@
  *   NOTE: NO _userId field in HAR! Only _id (message UUID)
  * 
  * Author: Local SDK Bridge
- * Version: 2.1.0
+ * Version: 2.4.0
  * ============================================================
  * 
+ * v2.4.0 Changelog (2026-04-05):
+ *   FIX: CRITICAL - SyntaxError "undefined" is not valid JSON after chat.login!
+ *     Root cause: chat.login handler returned {ret:0} WITHOUT data field.
+ *     Game's processHandlerWithChat ALWAYS does JSON.parse(e.data), so e.data MUST exist.
+ *     Before: return {ret:0} → e.data=undefined → JSON.parse(undefined) → CRASH!
+ *     After:  return buildChatResponse({}) → e.data="{}" → JSON.parse("{}") → success!
+ *     All chat handlers MUST use buildChatResponse() which includes ret, compress, data fields.
+ *
+ * v2.3.0 Changelog (2026-04-05):
+ *   FIX: Verify ACK callback now async (setTimeout 5ms) to match real Socket.IO
+ *     Real Socket.IO always delivers ACK callbacks asynchronously (network latency).
+ *     Synchronous callback caused race conditions with game reconnect logic.
+ *     The game's socketOnVerify success handler (e()) calls chatLoginRequest
+ *     synchronously, which can trigger emit() before the verify emit returns.
+ *   VERIFIED: Analyzed real server HAR (s49931-zd.pksilo.com:10507) - protocol confirmed:
+ *     - Verify: server EVENT push → client encrypt → client EVENT with ACK → server ACK {ret:0}
+ *     - Login: client EVENT → server ACK {ret:0}
+ *     - joinRoom(empty): client EVENT → server ACK {ret:0, compress:false, data:"{}"}
+ *     - joinRoom(msgs): client EVENT → server ACK {ret:0, compress:true, data:<LZString>}
+ *     - All callbacks receive OBJECT (not array) - Socket.IO engine unwraps wire format
+ *
+ * v2.2.0 Changelog (2026-04-05):
+ *   FIX: CRITICAL - Socket destroyed immediately after verify!
+ *     Root cause: All ACK callbacks were double-wrapped in array [{}]
+ *     Socket.IO wire format 4<id>[{"ret":0}] already wraps in array,
+ *     so callback should receive the OBJECT directly, not [{}]
+ *     Before: callback([{ret:0}]) → game sees n=[{ret:0}], n.ret=undefined → t.destroy()!
+ *     After:  callback({ret:0})  → game sees n={ret:0}, n.ret=0 → success!
+ *     Fixed in: verify event, _handleRequest callback, unknown event fallback
+ *
  * v2.1.0 Changelog (2026-04-01):
  *   FIX: CRITICAL - Removed duplicate connect event (was firing TWICE)
  *     Constructor _trigger('connect') + on('connect') auto-trigger caused game to corrupt state
@@ -248,8 +278,9 @@
             
             LOG.success('Chat login successful for user:', userId);
             
-            // HAR: 430[{"ret":0}] - _handleRequest wraps this in array
-            return { ret: 0 };
+            // MUST use buildChatResponse() - game's processHandlerWithChat does JSON.parse(e.data)
+            // Without data field: e.data=undefined → JSON.parse(undefined) → SyntaxError!
+            return buildChatResponse({});
         },
         
         /**
@@ -409,7 +440,7 @@
             
             if (!roomId) {
                 LOG.error('No roomId provided');
-                return buildResponse({ _time: getServerTime() });
+                return buildChatResponse({ _time: getServerTime() });
             }
             
             // Get user info
@@ -616,14 +647,23 @@
             } else if (event === 'verify') {
                 LOG.socket('Client emit verify (encrypted token):', data);
                 LOG.socket('Verify response - returning success');
-                // HAR: 435[{"ret":0}] - must be array-wrapped
+                // HAR: 430[{"ret":0}] - Socket.IO wire: ACK id=0, args=[{ret:0}]
+                // callback receives the OBJECT directly, NOT wrapped in array
+                // CRITICAL: Must be async (setTimeout) to match real Socket.IO behavior!
+                // Real server has network latency; game expects async callback.
+                // Synchronous callback can cause reconnection race conditions.
                 if (callback) {
-                    callback([{ ret: 0 }]);
+                    setTimeout(function() {
+                        LOG.socket('Verify callback fired (async)');
+                        callback({ ret: 0 });
+                    }, 5);
                 }
             } else {
                 LOG.warn('Unknown emit event: ' + event);
                 if (callback) {
-                    callback([{ ret: 0 }]);
+                    setTimeout(function() {
+                        callback({ ret: 0 });
+                    }, 5);
                 }
             }
         },
@@ -646,11 +686,12 @@
                 
                 if (callback) {
                     setTimeout(function() {
-                        // HAR: ALL Socket.IO ACK responses are wrapped in array
-                        // chat.login:  [{"ret":0}]
-                        // chat.joinRoom: [{"ret":0,"compress":false,"data":"..."}]
-                        LOG.socket('Calling callback with response (array-wrapped)');
-                        callback([response]);
+                        // Socket.IO wire: 4<id>[{"ret":0,...}] → callback receives {ret:0,...}
+                        // The wire format auto-wraps in array, so we pass the OBJECT directly
+                        // HAR: chat.login → [{"ret":0}] on wire means callback({ret:0})
+                        // HAR: chat.joinRoom → [{"ret":0,"compress":false,"data":"..."}] means callback({...})
+                        LOG.socket('Calling callback with response');
+                        callback(response);
                     }, 10);
                 }
             } else {
@@ -659,7 +700,7 @@
                 
                 if (callback) {
                     // No-handler: return empty success in chat format
-                    callback([buildChatResponse({})]);
+                    callback(buildChatResponse({}));
                 }
             }
         },
@@ -781,7 +822,7 @@
     // 9. INITIALIZE
     // ========================================================
     function init() {
-        LOG.title('Chat-Server Mock v2.1.0 Initialized');
+        LOG.title('Chat-Server Mock v2.4.0 Initialized');
         LOG.info('Chat Server URL:', CONFIG.chatServerUrl);
         LOG.info('Max Messages Per Room:', CONFIG.maxMessagesPerRoom);
         LOG.info('');
