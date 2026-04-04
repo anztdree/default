@@ -71,13 +71,13 @@
     // ========================================================
     var CONFIG = {
         // Main server URL → dipakai entergame.js untuk intercept io.connect
-        mainServerUrl: 'http://127.0.0.1:8081',
+        mainServerUrl: 'http://127.0.0.1:9998',
         
         // Chat server URL → dipakai chat-server.js untuk intercept io.connect
-        chatServerUrl: 'http://127.0.0.1:8082',
+        chatServerUrl: 'http://127.0.0.1:9997',
         
         // Dungeon server URL → dipakai dungeon-server/start.js untuk intercept io.connect
-        dungeonServerUrl: 'http://127.0.0.1:8083',
+        dungeonServerUrl: 'http://127.0.0.1:9996',
         
         // Server info
         serverId: '1',
@@ -168,7 +168,7 @@
             var userId = request.userId;
             
             // Server-generated fields (tidak ada di request — loginServer authority)
-            var loginToken = sdkUser ? sdkUser.token : 'token_' + Date.now();
+            var loginToken = sdkUser ? sdkUser.token : 'local_token_' + Date.now();
             var securityCode = sdkUser ? sdkUser.token : 'security_' + Date.now();
             
             // ============================================================
