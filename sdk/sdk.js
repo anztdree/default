@@ -90,30 +90,60 @@
     var STORAGE_KEY_SERVER = 'dragonball_local_sdk_server';
 
     // ========================================================
-    // 3. HELPER: Generate Random Strings
+    // 3. HELPER: Generate Random Strings (Natural Format)
     // ========================================================
+    
+    /**
+     * generateUserId - Generate short user ID
+     * Format: u + random digits (6-8 digits)
+     * Example: u123456, u87654321
+     * Natural and short format like real SDK
+     */
     function generateUserId() {
-        return 'u_' + Date.now().toString(36) + Math.random().toString(36).substring(2, 10);
+        // Generate 6-8 digit random number
+        var digits = 6 + Math.floor(Math.random() * 3); // 6, 7, or 8 digits
+        var num = Math.floor(Math.random() * Math.pow(10, digits));
+        // Pad with leading zeros if needed
+        var padded = num.toString().padStart(digits, '0');
+        return 'u' + padded;
     }
 
+    /**
+     * isValidUserId - Check if string is valid user ID format
+     * Format: u followed by digits
+     */
+    function isValidUserId(str) {
+        return /^u\d{6,8}$/.test(str);
+    }
+
+    /**
+     * generateToken - Generate natural-looking session token
+     * Format: 32 char hex string (looks like MD5 hash)
+     * Example: a1b2c3d4e5f6789012345678abcdef01
+     */
     function generateToken() {
-        return 'local_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 15);
+        var hex = '';
+        for (var i = 0; i < 32; i++) {
+            hex += Math.floor(Math.random() * 16).toString(16);
+        }
+        return hex;
     }
 
     // ========================================================
     // 4. LOAD OR CREATE USER DATA (localStorage)
     // ========================================================
+    
     function loadOrCreateUserData() {
         try {
             var stored = localStorage.getItem(STORAGE_KEY);
             if (stored) {
                 var parsed = JSON.parse(stored);
-                // Validate stored data has required fields
-                if (parsed && parsed.userId && parsed.token) {
+                // Validate stored data has required fields and correct format
+                if (parsed && parsed.userId && parsed.token && isValidUserId(parsed.userId)) {
                     LOG.info('Loaded existing user data:', parsed.userId);
                     return parsed;
                 } else {
-                    LOG.warn('Stored data invalid, creating new user');
+                    LOG.warn('Stored data invalid or wrong format, creating new user');
                     localStorage.removeItem(STORAGE_KEY);
                 }
             }
@@ -122,9 +152,10 @@
             try { localStorage.removeItem(STORAGE_KEY); } catch(e2) {}
         }
 
+        var newUserId = generateUserId();
         var newUserData = {
-            userId: generateUserId(),
-            nickname: 'Player',
+            userId: newUserId,
+            nickname: newUserId,  // Same as userId
             token: generateToken(),
             createdAt: Date.now()
         };
@@ -316,9 +347,19 @@
 
     /**
      * getSdkLoginInfo - CRITICAL for game auth flow
-     * Game expects: { sdk, nickName, userId, security, sign }
+     * Game expects: { sdk, nickName, userId, security, sign, loginToken }
+     * - loginToken: Initial session token, may be updated by login server
      * - sign: ts.loginUserInfo.sign — sent to game server for auth
      * - security: securityCode for SDK login validation
+     * 
+     * Based on main.min.js analysis:
+     * ts.loginInfo.userInfo = {
+     *     loginToken: e.loginToken,
+     *     userId: e.userId,
+     *     nickName: e.nickName,
+     *     channelCode: e.sdk,
+     *     securityCode: e.security
+     * }
      */
     function getSdkLoginInfo() {
         return {
@@ -326,7 +367,8 @@
             nickName: SDK_CONFIG.thirdParams.nickname,
             userId: SDK_CONFIG.thirdParams.userid,
             security: SDK_CONFIG.thirdParams.data.securityCode,
-            sign: SDK_CONFIG.thirdParams.data.securityCode
+            sign: SDK_CONFIG.thirdParams.data.securityCode,
+            loginToken: SDK_CONFIG.thirdParams.data.securityCode  // Same as token for standalone
         };
     }
 
@@ -413,9 +455,10 @@
      */
     window.switchUser = function() {
         LOG.call('switchUser() - Generating new user...');
+        var newUserId = generateUserId();
         userData = {
-            userId: generateUserId(),
-            nickname: 'Player',
+            userId: newUserId,
+            nickname: newUserId,  // Same as userId
             token: generateToken(),
             createdAt: Date.now()
         };
