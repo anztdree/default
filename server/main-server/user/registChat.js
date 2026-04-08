@@ -15,7 +15,12 @@
  * Based on real server HAR data structure
  * 
  * Author: Local SDK Bridge
- * Version: 1.0.0
+ * Version: 1.1.0
+ * ============================================================
+ * 
+ * v1.1.0 Changelog:
+ *   FIX: Extract hardcoded key ke constant CHAT_ROOMS_KEY
+ *   FIX: Empty catch blocks sekarang log warning
  * ============================================================
  */
 
@@ -56,18 +61,21 @@
         });
     }
 
+    // FIXED: Extract key ke constant agar konsisten
+    var CHAT_ROOMS_KEY = 'dragonball_chat_rooms_';
+
     /**
      * Generate stable room IDs (same IDs per userId, persisted)
      * Real server generates UUIDs but they stay the same for a user
      */
     function getRoomIds(userId) {
-        var key = 'dragonball_chat_rooms_' + userId;
+        var key = CHAT_ROOMS_KEY + userId;
         try {
             var stored = localStorage.getItem(key);
             if (stored) {
                 return JSON.parse(stored);
             }
-        } catch (e) {}
+        } catch (e) { LOG.warn('Failed to load chat rooms:', e); }
 
         var rooms = {
             worldRoomId: generateUUID(),
@@ -76,7 +84,7 @@
 
         try {
             localStorage.setItem(key, JSON.stringify(rooms));
-        } catch (e) {}
+        } catch (e) { LOG.warn('Failed to save chat rooms:', e); }
 
         return rooms;
     }

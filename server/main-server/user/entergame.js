@@ -1678,9 +1678,18 @@
     window.MainServerHandlers = RequestHandlers;
     window.MainServerConfig = CONFIG;
     window.MainServerLOG = LOG;
+    // FIXED: Expose getPlayerData static method agar chat-server.js
+    // bisa mengakses player data (nickname, headImage) untuk pesan chat
+    window.MainServerGetPlayerData = loadOrCreatePlayerData;
     
     // Auto-initialize
     window.LOCAL_MAIN_SERVER = new MainServer();
+    
+    // FIXED: Tambahkan getPlayerData ke instance agar chat-server.js
+    // bisa mengakses via window.LOCAL_MAIN_SERVER.getPlayerData(userId)
+    window.LOCAL_MAIN_SERVER.getPlayerData = function(userId) {
+        return loadOrCreatePlayerData(userId ? { userId: userId } : null);
+    };
     
     LOG.title('🎮 MAIN SERVER READY');
     LOG.success('MainServer registered on window');
@@ -1754,7 +1763,7 @@
     // 10. INITIALIZE
     // ========================================================
     function init() {
-        LOG.title('🎮 MAIN SERVER v4.2.0 INITIALIZED');
+        LOG.title('🎮 MAIN SERVER v5.0.0 INITIALIZED');
         LOG.info('Main Server URL:', CONFIG.mainServerUrl);
         LOG.info('Server ID:', CONFIG.serverId);
         LOG.info('Server Name:', CONFIG.serverName);
