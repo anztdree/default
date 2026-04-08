@@ -1,6 +1,6 @@
 /**
  * ============================================================
- * SDK.JS - DragonBall HTML5 Standalone SDK v3.0
+ * SDK.JS - DragonBall HTML5 Standalone SDK v3.1.0
  * ============================================================
  * 
  * PRINSIP: SDK menyediakan APA YANG GAME BUTUHKAN.
