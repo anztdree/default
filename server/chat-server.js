@@ -446,8 +446,11 @@
             // Get user info
             var sdkUser = window.LOCAL_SDK ? window.LOCAL_SDK.user : null;
             var playerData = null;
-            if (window.MAIN_SERVER_MOCK && window.MAIN_SERVER_MOCK.getPlayerData) {
-                playerData = window.MAIN_SERVER_MOCK.getPlayerData(userId);
+            // FIXED: Referensi window.MAIN_SERVER_MOCK tidak ada di entergame.js.
+            // entergame.js exports: window.LOCAL_MAIN_SERVER (instance of MainServer).
+            // Gunakan LOCAL_MAIN_SERVER.getPlayerData() jika tersedia.
+            if (window.LOCAL_MAIN_SERVER && window.LOCAL_MAIN_SERVER.getPlayerData) {
+                playerData = window.LOCAL_MAIN_SERVER.getPlayerData(userId);
             }
             
             // Build user info
@@ -796,7 +799,7 @@
                         isChatServer = true;
                     }
                 }
-            } catch (e) {}
+            } catch (e) { /* ts object not yet available */ }
             
             // Also check by port
             if (url.indexOf('9997') !== -1 ||
