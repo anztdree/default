@@ -692,6 +692,40 @@
     };
 
     // ========================================================
+    // 10b. ADDITIONAL WINDOW FUNCTIONS - Called by game with && guard
+    // ========================================================
+    // Fungsi-fungsi ini dipanggil game dengan pattern:
+    //   window.funcName && window.funcName(data)
+    // Jadi tidak wajib ada, tapi game mengharapkannya ada.
+    // Tanpa ini, game TIDAK crash, tapi reporting/analytics tidak berjalan.
+
+    /**
+     * reportToBSH5Createrole(data) - Dipanggil di line 25897
+     * Pattern: window.reportToBSH5Createrole && window.reportToBSH5Createrole(e)
+     * Tujuan: Report character creation ke BSH5 analytics
+     */
+    window.reportToBSH5Createrole = function(data) {
+        LOG.call('reportToBSH5Createrole()');
+    };
+
+    /**
+     * reportToFbq(data) - Dipanggil di line 25902
+     * Pattern: window && window.reportToFbq && window.reportToFbq(e)
+     * Tujuan: Facebook Pixel reporting (channel-specific)
+     */
+    window.reportToFbq = function(data) {
+        LOG.call('reportToFbq()');
+    };
+
+    /**
+     * dotq - Dipanggil di line 25905 (hanya saat sdkChannel === "en")
+     * Pattern: "en" == t && window.dotq && (window.dotq = window.dotq || [], window.dotq.push({...}))
+     * Tujuan: Yahoo Gemini Pixel tracking
+     * HARUS dimulai sebagai array jika channel == "en"
+     */
+    window.dotq = [];
+
+    // ========================================================
     // 11. WINDOW VARIABLES - Dibaca langsung oleh game
     // ========================================================
     // Game membaca ini via TSBrowser.getVariantValue(name) → window[name]
@@ -715,6 +749,22 @@
      * Tampilkan gambar konten 16+. Tidak di-set dari clientParams di index.html
      */
     window.showSixteenImg = false;
+
+    /**
+     * window.show18Login - Dipakai di line 37294
+     * Tampilkan gambar konten 18+. Di-set oleh refreshPage() di index.html.
+     * index.html: window["show18Login"] = clientParams["show18Login"]
+     * Tanpa ini, gambar 18+ tidak ditampilkan saat refresh.
+     * Game code: window.show18Login && (e.needAgeOverImg.source = "zhujiemian_18+_png")
+     */
+    window.show18Login = false;
+
+    /**
+     * window.show18Home - Dipakai di index.html refreshPage()
+     * Tampilkan konten 18+ di home screen.
+     * Di-set oleh: window["show18Home"] = clientParams["show18Home"]
+     */
+    window.show18Home = false;
 
     /**
      * window.loginpictype - Dipakai di line 37294
@@ -863,6 +913,8 @@
     LOG.info('  reportToCpapiCreaterole, fbq, gtag');
     LOG.info('');
     LOG.info('Unprotected functions (20): checkSDK, checkFromNative, paySdk, ...');
+    LOG.info('Additional (&& guarded): reportToBSH5Createrole, reportToFbq, dotq');
+    LOG.info('Window variables (7): sdkChannel, showContact, showSixteenImg, show18Login, show18Home, loginpictype, issdkVer2');
     LOG.info('');
     LOG.info('Debug: LOCAL_SDK.showConfig()');
 
