@@ -9,10 +9,7 @@
  *
  *  CARA PAKAI:
  *    Di index.html, tambahkan SEBELUM script lainnya:
- *    <script src="SDK/sdk.js"></script>
- *
- *    ATAU kalau index.html tidak mau di-edit, inject via nginx:
- *    sub_filter '</head>' '<script src="/SDK/sdk.js"></script></head>';
+ *    <script src="sdk/sdk.js"></script>
  *
  *  PENTING:
  *    - sdk.js HARUS load SEBELUM game code (main.min.js)
@@ -21,6 +18,11 @@
  *    - Order: sdk.js → jszip → inline-boot → inline-sdk-bridge
  *    - Kalau sdk.js load setelah inline-sdk-bridge, bridge tidak aktif
  *      SOLUSI: sdk.js juga override fungsi bridge sendiri (fallback)
+ *
+ *  PRINSIP:
+ *    - Tidak ada bypass — setiap fungsi bekerja sesuai harapan game
+ *    - Menyediakan apa yang game butuhkan dari SDK
+ *    - Jika fungsi tidak berjalan, game error silent (tanpa pesan)
  */
 
 (function () {
@@ -29,10 +31,13 @@
     // ============================================================
     //  Konfigurasi
     // ============================================================
-    var SDK_VERSION = "2.0.0";
+    var SDK_VERSION = "2.1.0";
     var SDK_SERVER = window.location.protocol + "//" + window.location.hostname + ":9999";
-    var GAME_SERVER = "http://127.0.0.1:8000";
-    var APP_ID = "ppgame_custom";
+    var GAME_SERVER_DEFAULT = "http://127.0.0.1:8000";
+    var APP_ID = "ppgame";
+
+    // Payment callback timeout (berapa lama menunggu konfirmasi)
+    var PAYMENT_CALLBACK_TIMEOUT = 30000; // 30 detik
 
     // ============================================================
     //  Helpers — paling awal supaya semua fungsi bisa pakai
@@ -62,6 +67,9 @@
         var xhr = new XMLHttpRequest();
         xhr.open("POST", SDK_SERVER + path, true);
         xhr.setRequestHeader("Content-Type", "application/json");
+        if (_state.loginToken) {
+            xhr.setRequestHeader("Authorization", "Bearer " + _state.loginToken);
+        }
         xhr.timeout = 8000;
         xhr.onreadystatechange = function () {
             if (xhr.readyState === 4) {
@@ -72,7 +80,7 @@
                         errorCallback && errorCallback(e);
                     }
                 } else {
-                    errorCallback && errorCallback(xhr.status);
+                    errorCallback && errorCallback({ status: xhr.status, response: xhr.responseText });
                 }
             }
         };
@@ -87,6 +95,9 @@
     function _httpGet(path, callback, errorCallback) {
         var xhr = new XMLHttpRequest();
         xhr.open("GET", SDK_SERVER + path, true);
+        if (_state.loginToken) {
+            xhr.setRequestHeader("Authorization", "Bearer " + _state.loginToken);
+        }
         xhr.timeout = 8000;
         xhr.onreadystatechange = function () {
             if (xhr.readyState === 4) {
@@ -97,7 +108,7 @@
                         errorCallback && errorCallback(e);
                     }
                 } else {
-                    errorCallback && errorCallback(xhr.status);
+                    errorCallback && errorCallback({ status: xhr.status, response: xhr.responseText });
                 }
             }
         };
@@ -130,6 +141,17 @@
         return Date.now().toString(36) + Math.random().toString(36).substring(2, 10);
     }
 
+    /** Safe JSON parse — tidak crash jika string malformed */
+    function _safeJsonParse(str, fallback) {
+        if (typeof str !== "string") return str;
+        try {
+            return JSON.parse(str);
+        } catch (e) {
+            console.warn("[PPGAME] JSON parse error:", e.message);
+            return fallback || str;
+        }
+    }
+
     // ============================================================
     //  State Management
     // ============================================================
@@ -144,8 +166,12 @@
         characterName: null,
         characterLevel: 1,
         sessionId: null,
-        lastLoginTime: null
+        lastLoginTime: null,
+        gameServerUrl: null
     });
+
+    // Pending payment callbacks — { orderId: { callback, timeout } }
+    var _paymentCallbacks = {};
 
     function _saveState() {
         _storageSet("ppgame_state", _state);
@@ -156,6 +182,14 @@
     }
 
     function _clearLogin() {
+        // Panggil logout callback jika ada
+        if (typeof window._ppgameLogoutCallback === "function") {
+            try {
+                window._ppgameLogoutCallback("logout");
+            } catch (e) {
+                console.warn("[PPGAME] Logout callback error:", e);
+            }
+        }
         _state.userId = null;
         _state.nickname = null;
         _state.loginToken = null;
@@ -169,9 +203,12 @@
         _state.userId = info.userId;
         _state.nickname = info.nickname || ("Player_" + info.userId.slice(0, 6));
         _state.loginToken = info.loginToken;
-        _state.sdk = info.sdk || "custom";
+        _state.sdk = info.sdk || "ppgame";
         _state.sessionId = _simpleUID();
         _state.lastLoginTime = Date.now();
+        if (info.gameServerUrl) {
+            _state.gameServerUrl = info.gameServerUrl;
+        }
         _saveState();
     }
 
@@ -198,10 +235,26 @@
         /**
          * Buat order pembayaran.
          * Dipanggil oleh index.html: paySdk(a) → PPGAME.createPaymentOrder(a)
+         *
+         * Game mengirim orderData dengan field:
+         *   goodsId / productId  — ID produk
+         *   goodsName / productName — Nama produk
+         *   price / amount       — Harga
+         *   currency             — Mata uang (USD, dll)
+         *   serverId             — ID server
+         *   roleId               — ID karakter
+         *   roleName             — Nama karakter
+         *   orderNo              — Nomor order dari game
+         *   ext                  — Data tambahan
+         *
          * @param {object} orderData - Data order dari game
          */
         createPaymentOrder: function (orderData) {
             console.log("[PPGAME] createPaymentOrder:", JSON.stringify(orderData));
+
+            // Tampilkan UI payment processing
+            _showPaymentProcessing(orderData);
+
             _httpPost("/api/payment/create", {
                 order: orderData,
                 userId: _state.userId,
@@ -210,17 +263,21 @@
                 characterName: _state.characterName
             }, function (res) {
                 console.log("[PPGAME] Payment order created:", res);
+
                 if (res && res.orderId) {
-                    // Auto-complete payment (sandbox mode)
-                    _httpPost("/api/payment/complete", {
-                        orderId: res.orderId,
-                        userId: _state.userId
-                    }, function (res2) {
-                        console.log("[PPGAME] Payment completed:", res2);
-                    });
+                    // Simpan callback untuk payment ini
+                    // Game mungkin mengharapkan notifikasi saat payment selesai
+                    _paymentCallbacks[res.orderId] = {
+                        orderData: orderData,
+                        createTime: Date.now()
+                    };
+
+                    // Poll payment status secara berkala
+                    _pollPaymentStatus(res.orderId, orderData);
                 }
             }, function (err) {
                 console.error("[PPGAME] Payment error:", err);
+                _showPaymentResult(false, "Payment gagal. Coba lagi.");
             });
         },
 
@@ -233,13 +290,24 @@
             _httpPost("/api/event", {
                 event: "game_ready",
                 userId: _state.userId,
-                data: { version: SDK_VERSION, timestamp: Date.now() }
+                data: {
+                    version: SDK_VERSION,
+                    timestamp: Date.now(),
+                    userId: _state.userId,
+                    nickname: _state.nickname
+                }
             });
 
             // Sembunyikan tombol Guest kalau ada
             var guestBtn = document.getElementById("ppgame-guest-btn");
             if (guestBtn) {
                 guestBtn.style.display = "none";
+            }
+
+            // Sembunyikan login overlay kalau ada
+            var overlay = document.getElementById("ppgame-login-overlay");
+            if (overlay) {
+                overlay.style.display = "none";
             }
         },
 
@@ -251,16 +319,22 @@
         playerEnterServer: function (info) {
             console.log("[PPGAME] playerEnterServer:", JSON.stringify(info));
             if (info) {
-                _state.serverId = info.serverId;
-                _state.serverName = info.serverName;
-                _state.characterId = info.characterId;
-                _state.characterName = info.characterName;
+                _state.serverId = info.serverId || _state.serverId;
+                _state.serverName = info.serverName || _state.serverName;
+                _state.characterId = info.characterId || info.characterid || _state.characterId;
+                _state.characterName = info.characterName || info.charactername || _state.characterName;
                 _saveState();
             }
             _httpPost("/api/event", {
                 event: "enter_server",
                 userId: _state.userId,
-                data: info || {}
+                data: {
+                    characterName: _state.characterName,
+                    characterId: _state.characterId,
+                    serverId: _state.serverId,
+                    serverName: _state.serverName,
+                    timestamp: Date.now()
+                }
             });
         },
 
@@ -272,7 +346,7 @@
          *   PPGAME.submitEvent("game_tutorial_finish")
          */
         submitEvent: function (eventName, data) {
-            console.log("[PPGAME] submitEvent:", eventName);
+            console.log("[PPGAME] submitEvent:", eventName, data ? JSON.stringify(data) : "");
             _httpPost("/api/event", {
                 event: eventName,
                 userId: _state.userId,
@@ -302,7 +376,11 @@
             _httpPost("/api/event", {
                 event: "open_shop",
                 userId: _state.userId,
-                data: {}
+                data: {
+                    characterId: _state.characterId,
+                    characterLevel: _state.characterLevel,
+                    serverId: _state.serverId
+                }
             });
         },
 
@@ -323,6 +401,95 @@
             });
         }
     };
+
+    // ============================================================
+    //  PAYMENT POLLING — Cek status payment secara berkala
+    //  Mengganti timeout blind yang bisa false-positive di live mode
+    // ============================================================
+
+    /**
+     * Poll payment status dari SDK server.
+     * Cek setiap 1 detik, maksimal PAYMENT_CALLBACK_TIMEOUT.
+     * Hanya trigger callback saat status benar-benar "completed".
+     */
+    function _pollPaymentStatus(orderId, orderData) {
+        var startTime = Date.now();
+        var pollInterval = 1000; // Cek setiap 1 detik
+        var maxWait = PAYMENT_CALLBACK_TIMEOUT;
+
+        var pollTimer = setInterval(function () {
+            var elapsed = Date.now() - startTime;
+
+            // Timeout — payment belum selesai
+            if (elapsed > maxWait) {
+                clearInterval(pollTimer);
+                delete _paymentCallbacks[orderId];
+                console.warn("[PPGAME] Payment polling timeout:", orderId);
+                _showPaymentResult(false, "Payment timeout. Coba lagi.");
+                return;
+            }
+
+            // Cek status ke server
+            _httpGet("/api/payment/verify/" + orderId, function (res) {
+                if (res && res.status === "completed") {
+                    clearInterval(pollTimer);
+                    _onPaymentComplete(orderId, orderData);
+                } else if (res && res.status === "failed") {
+                    clearInterval(pollTimer);
+                    delete _paymentCallbacks[orderId];
+                    _showPaymentResult(false, "Payment gagal.");
+                }
+                // Jika masih "pending", lanjut polling
+            }, function () {
+                // Error saat polling — lanjut coba lagi
+            });
+        }, pollInterval);
+    }
+
+    // ============================================================
+    //  PAYMENT CALLBACK — Notifikasi ke game saat payment selesai
+    // ============================================================
+
+    /**
+     * Dipanggil saat payment selesai (diverifikasi dari server).
+     * Game mungkin mengharapkan callback melalui fungsi global.
+     */
+    function _onPaymentComplete(orderId, orderData) {
+        // Hapus dari pending
+        var callback = _paymentCallbacks[orderId];
+        delete _paymentCallbacks[orderId];
+
+        console.log("[PPGAME] Payment complete for order:", orderId);
+
+        // Tampilkan UI sukses
+        var productName = orderData.goodsName || orderData.productName || "Item";
+        _showPaymentResult(true, productName + " berhasil dibeli!");
+
+        // Game mungkin mendaftarkan callback global
+        // Format umum: window.onPayResult atau window.paySdkCallback
+        if (typeof window.onPayResult === "function") {
+            try {
+                window.onPayResult({ orderId: orderId, status: "completed", orderData: orderData });
+            } catch (e) {
+                console.warn("[PPGAME] onPayResult callback error:", e);
+            }
+        }
+
+        if (typeof window.paySdkCallback === "function") {
+            try {
+                window.paySdkCallback({ orderId: orderId, status: "completed", orderData: orderData });
+            } catch (e) {
+                console.warn("[PPGAME] paySdkCallback error:", e);
+            }
+        }
+
+        // Kirim event ke SDK server
+        _httpPost("/api/event", {
+            event: "payment_callback_sent",
+            userId: _state.userId,
+            data: { orderId: orderId }
+        });
+    }
 
     // ============================================================
     //  FUNGSI BRIDGE — Override index.html functions
@@ -354,41 +521,54 @@
      * Return format: { sdk, loginToken, nickName, userId } atau null
      * PERHATIAN: key "nickName" (dengan N besar) — bukan "nickname"
      */
+    // Flag: URL params sudah di-consume saat boot
+    // Supaya getSdkLoginInfo() tidak re-read URL params terus-menerus
+    // (kalau re-read, bisa overwrite token baru dari init callback dengan token lama dari URL)
+    var _urlParamsConsumed = false;
+
     window.getSdkLoginInfo = function () {
-        // 1. Cek URL params dulu (cara asli index.html)
-        var params = _parseUrlParams();
-        if (params.sdk && params.logintoken && params.nickname && params.userid) {
+        // 1. Cek state dulu (sudah termasuk data dari URL params + init callback)
+        //    Ini PRIORITAS karena state bisa sudah di-update oleh init callback
+        //    dengan token baru, sementara URL params masih punya token lama.
+        if (_state.userId && _state.loginToken) {
             var info = {
-                sdk: params.sdk,
-                loginToken: params.logintoken,
-                nickName: params.nickname,
-                userId: params.userid
+                sdk: _state.sdk || "ppgame",
+                loginToken: _state.loginToken,
+                nickName: _state.nickname || ("Player_" + _state.userId.slice(0, 6)),  // N besar
+                userId: _state.userId
             };
-            // Sync ke state
-            _setLogin({
-                userId: params.userid,
-                nickname: params.nickname,
-                loginToken: params.logintoken,
-                sdk: params.sdk
-            });
-            console.log("[PPGAME] getSdkLoginInfo → dari URL:", info.userId);
+            console.log("[PPGAME] getSdkLoginInfo -> dari state:", info.userId);
+            _urlParamsConsumed = true;  // Setelah state ada, URL params tidak relevan lagi
             return info;
         }
 
-        // 2. Cek localStorage (dari Guest login / login sebelumnya)
-        if (_state.userId && _state.loginToken) {
-            var info = {
-                sdk: _state.sdk || "custom",
-                loginToken: _state.loginToken,
-                nickName: _state.nickname || ("Player_" + _state.userId.slice(0, 6)),
-                userId: _state.userId
-            };
-            console.log("[PPGAME] getSdkLoginInfo → dari storage:", info.userId);
-            return info;
+        // 2. Fallback: Cek URL params (hanya jika belum ada state)
+        //    Ini untuk kasus dimana state belum di-set (misal localStorage di-clear)
+        //    tapi URL params masih ada dari redirect.
+        if (!_urlParamsConsumed) {
+            var params = _parseUrlParams();
+            if (params.sdk && params.logintoken && params.nickname && params.userid) {
+                var info = {
+                    sdk: params.sdk,
+                    loginToken: params.logintoken,
+                    nickName: params.nickname,  // N besar — format yang game harapkan
+                    userId: params.userid
+                };
+                // Sync ke state
+                _setLogin({
+                    userId: params.userid,
+                    nickname: params.nickname,
+                    loginToken: params.logintoken,
+                    sdk: params.sdk
+                });
+                _urlParamsConsumed = true;
+                console.log("[PPGAME] getSdkLoginInfo -> dari URL (fallback):", info.userId);
+                return info;
+            }
         }
 
         // 3. Tidak ada login info
-        console.log("[PPGAME] getSdkLoginInfo → null (belum login)");
+        console.log("[PPGAME] getSdkLoginInfo -> null (belum login)");
         return null;
     };
 
@@ -400,6 +580,7 @@
     /**
      * checkFromNative — Cek apakah app berjalan di native wrapper.
      * Return false = browser mode.
+     * Game menggunakan ini untuk menentukan UI behavior.
      */
     window.checkFromNative = function () {
         return false;
@@ -408,15 +589,37 @@
     /**
      * switchAccount — Ganti akun.
      * Tampilkan dialog pilih akun atau buat baru.
+     * PENTING: Panggil logout callback SEBELUM switch.
      */
     window.switchAccount = function () {
         console.log("[PPGAME] switchAccount");
+
+        // Panggil logout callback dulu supaya game bersihkan state
+        if (typeof window._ppgameLogoutCallback === "function") {
+            try {
+                window._ppgameLogoutCallback("switch");
+            } catch (e) {
+                console.warn("[PPGAME] Logout callback error on switch:", e);
+            }
+        }
+
+        // Logout dari SDK server
+        _httpPost("/api/account/logout", {
+            userId: _state.userId,
+            loginToken: _state.loginToken
+        });
+
+        // Clear local state setelah logout server
+        _clearLogin();
+
         _showAccountSwitchUI();
     };
 
     /**
      * getAppId — Return app ID untuk SDK.
+     * Game menggunakan ini untuk identifikasi aplikasi.
      */
+    window.APP_ID = APP_ID;
     window.getAppId = function () {
         return APP_ID;
     };
@@ -424,25 +627,29 @@
     /**
      * getLoginServer — Return URL game server.
      * Game pakai ini untuk koneksi Socket.IO.
+     * Baca dari SDK server settings supaya dinamis.
      */
     window.getLoginServer = function () {
-        return GAME_SERVER;
+        // Prioritas: state > default
+        return _state.gameServerUrl || GAME_SERVER_DEFAULT;
     };
 
     /**
      * changeLanguage — Ganti bahasa SDK channel.
+     * Game memanggil ini saat user ganti language di settings.
      */
     window.changeLanguage = function (lang) {
         console.log("[PPGAME] changeLanguage:", lang);
         window.sdkChannel = lang || "en";
-        _httpPost("/api/settings", { language: lang }, function () {
-            // Reload tidak perlu — game handle sendiri
-        });
+        _httpPost("/api/settings", { language: lang });
     };
 
     /**
      * accountLoginCallback — Register callback untuk logout/switch.
-     * Game mendaftarkan callback yang dipanggil saat user logout.
+     * Game mendaftarkan callback yang dipanggil saat user logout atau switch account.
+     * Ini KRITIAL — kalau tidak dipanggil, game state tidak bersih saat ganti akun.
+     *
+     * @param {function} callback - Fungsi yang dipanggil saat logout/switch
      */
     window.accountLoginCallback = function (callback) {
         console.log("[PPGAME] accountLoginCallback registered");
@@ -451,75 +658,84 @@
 
     /**
      * report2Sdk350CreateRole — Report create role ke SDK 350.
+     * Dipanggil oleh game saat role baru dibuat (channel 350 reporting).
      */
     window.report2Sdk350CreateRole = function (data) {
-        console.log("[PPGAME] report2Sdk350CreateRole");
+        console.log("[PPGAME] report2Sdk350CreateRole:", typeof data === "string" ? data : JSON.stringify(data));
         _httpPost("/api/event", {
             event: "sdk350_create_role",
             userId: _state.userId,
-            data: typeof data === "string" ? JSON.parse(data) : data
+            data: _safeJsonParse(data)
         });
     };
 
     /**
      * report2Sdk350LoginUser — Report login ke SDK 350.
+     * Dipanggil oleh game saat user login (channel 350 reporting).
      */
     window.report2Sdk350LoginUser = function (data) {
-        console.log("[PPGAME] report2Sdk350LoginUser");
+        console.log("[PPGAME] report2Sdk350LoginUser:", typeof data === "string" ? data : JSON.stringify(data));
         _httpPost("/api/event", {
             event: "sdk350_login",
             userId: _state.userId,
-            data: typeof data === "string" ? JSON.parse(data) : data
+            data: _safeJsonParse(data)
         });
     };
 
     /**
      * reportToCpapiCreaterole — Report create role ke CP API.
+     * Dipanggil oleh game saat role baru dibuat (CP channel reporting).
      */
     window.reportToCpapiCreaterole = function (data) {
-        console.log("[PPGAME] reportToCpapiCreaterole");
+        console.log("[PPGAME] reportToCpapiCreaterole:", typeof data === "string" ? data : JSON.stringify(data));
         _httpPost("/api/event", {
             event: "cpapi_create_role",
             userId: _state.userId,
-            data: typeof data === "string" ? JSON.parse(data) : data
+            data: _safeJsonParse(data)
         });
     };
 
     /**
      * reportToBSH5Createrole — Report create role ke BS H5.
+     * Dipanggil oleh game saat role baru dibuat (BS H5 channel reporting).
      */
     window.reportToBSH5Createrole = function (data) {
-        console.log("[PPGAME] reportToBSH5Createrole");
+        console.log("[PPGAME] reportToBSH5Createrole:", typeof data === "string" ? data : JSON.stringify(data));
         _httpPost("/api/event", {
             event: "bs_h5_create_role",
             userId: _state.userId,
-            data: typeof data === "string" ? JSON.parse(data) : data
+            data: _safeJsonParse(data)
         });
     };
 
     /**
      * reportToFbq — Report ke Facebook Pixel (stub).
+     * Game memanggil ini tapi kita tidak punya Facebook Pixel.
+     * Tidak boleh error — harus diam saja.
      */
     window.reportToFbq = function () {
-        // Facebook Pixel — tidak digunakan di self-hosted
+        // Facebook Pixel — tidak digunakan di self-hosted, diam saja
     };
 
     /**
      * fbq — Facebook Pixel function (stub).
+     * Harus ada supaya game tidak error saat memanggil fbq().
      */
     window.fbq = function () {
-        // Facebook Pixel — stub
+        // Facebook Pixel — stub, tidak boleh error
     };
 
     /**
      * gtag — Google Analytics function (stub).
+     * Harus ada supaya game tidak error saat memanggil gtag().
      */
     window.gtag = function () {
-        // Google Analytics — stub
+        // Google Analytics — stub, tidak boleh error
     };
 
     /**
      * reportLogToPP — Report log ke PPGAME.
+     * Game mengirim log events (crash, performance, dll).
      */
     window.reportLogToPP = function (name, data) {
         console.log("[PPGAME] reportLogToPP:", name);
@@ -532,6 +748,7 @@
 
     /**
      * sendCustomEvent — Kirim custom event.
+     * Game bisa mengirim event custom kapan saja.
      */
     window.sendCustomEvent = function (name, data) {
         console.log("[PPGAME] sendCustomEvent:", name);
@@ -544,6 +761,7 @@
 
     /**
      * openURL — Buka URL di tab baru.
+     * Dipanggil game untuk link eksternal (privacy policy, dll).
      */
     window.openURL = function (url) {
         console.log("[PPGAME] openURL:", url);
@@ -559,27 +777,77 @@
 
     /**
      * reportChatMsg — Report chat message (moderasi).
+     * Game mengirim chat message untuk moderasi.
      */
     window.reportChatMsg = function (data) {
         _httpPost("/api/event", {
             event: "chat_msg",
             userId: _state.userId,
-            data: typeof data === "string" ? JSON.parse(data) : data
+            data: _safeJsonParse(data)
         });
     };
 
     /**
-     * initSDKDe — SDK init delegate (dipanggil game saat boot).
+     * initSDKDe — SDK init delegate.
+     * Dipanggil oleh game saat boot selesai untuk menginisialisasi SDK.
+     * Game mungkin mengharapkan return value tertentu.
+     * Return true = SDK berhasil diinisialisasi.
      */
     window.initSDKDe = function () {
-        console.log("[PPGAME] initSDKDe called");
+        console.log("[PPGAME] initSDKDe called — SDK initialization complete");
+        // Report init ke server
+        _httpPost("/api/event", {
+            event: "sdk_init_delegate",
+            userId: _state.userId,
+            data: { version: SDK_VERSION, timestamp: Date.now() }
+        });
+        return true;
     };
+
+    /**
+     * getDeviceId — Return device ID untuk SDK.
+     * Game mungkin memanggil ini untuk identifikasi perangkat.
+     */
+    window.getDeviceId = function () {
+        return _getDeviceId();
+    };
+
+    /**
+     * isSDKReady — Cek apakah SDK sudah siap.
+     */
+    var _sdkReady = false;
+    window.isSDKReady = function () {
+        return _sdkReady;
+    };
+
+    /**
+     * onPayResult — Callback untuk payment result.
+     * Game bisa mendaftarkan callback ini untuk menerima notifikasi payment.
+     * Default: tidak ada callback, game bisa override.
+     */
+    if (typeof window.onPayResult === "undefined") {
+        window.onPayResult = null;
+    }
+
+    /**
+     * paySdkCallback — Callback alternatif untuk payment.
+     */
+    if (typeof window.paySdkCallback === "undefined") {
+        window.paySdkCallback = null;
+    }
 
     // ============================================================
     //  FUNGSI BRIDGE YANG DIDELEGASIKAN KE PPGAME
     //  index.html define ini di if(window.PPGAME) block.
     //  Tapi kalau sdk.js load setelah inline script,
     //  kita harus define sendiri sebagai fallback.
+    //
+    //  PENTING: report2Sdk harus menangani SEMUA dataType:
+    //    dataType 1 = login report
+    //    dataType 2 = create role
+    //    dataType 3 = enter server
+    //    dataType 4 = level up
+    //    dataType 5 = logout
     // ============================================================
     function _ensureBridgeFunctions() {
         if (typeof window.paySdk === "undefined") {
@@ -588,26 +856,7 @@
         if (typeof window.gameReady === "undefined") {
             window.gameReady = function () { window.PPGAME.gameReady(); };
         }
-        if (typeof window.report2Sdk === "undefined") {
-            window.report2Sdk = function (a) {
-                if (!a) return;
-                if (a.dataType == 3) {
-                    window.PPGAME.playerEnterServer({
-                        characterName: a.roleName,
-                        characterId: a.roleID,
-                        serverId: a.serverID,
-                        serverName: a.serverName
-                    });
-                } else if (a.dataType == 2) {
-                    window.PPGAME.submitEvent("game_create_role", {
-                        characterName: a.roleName,
-                        characterId: a.roleID,
-                        serverId: a.serverID,
-                        serverName: a.serverName
-                    });
-                }
-            };
-        }
+        // report2Sdk sudah di-override secara global di atas — tidak perlu fallback di sini
         if (typeof window.gameChapterFinish === "undefined") {
             window.gameChapterFinish = function (a) { window.PPGAME.gameChapterFinish(a); };
         }
@@ -623,6 +872,68 @@
     }
 
     // ============================================================
+    //  Override report2Sdk dari index.html
+    //  index.html hanya menangani dataType 2 dan 3.
+    //  Kita override untuk menangani SEMUA dataType.
+    // ============================================================
+    window.report2Sdk = function (a) {
+        if (!a) return;
+
+        // Tangani semua dataType secara lengkap
+        switch (a.dataType) {
+            case 1: // Login report
+                console.log("[PPGAME] report2Sdk dataType=1 (login):", JSON.stringify(a));
+                window.PPGAME.submitEvent("game_login", {
+                    characterName: a.roleName,
+                    characterId: a.roleID,
+                    serverId: a.serverID,
+                    serverName: a.serverName
+                });
+                break;
+            case 2: // Create role
+                window.PPGAME.submitEvent("game_create_role", {
+                    characterName: a.roleName,
+                    characterId: a.roleID,
+                    serverId: a.serverID,
+                    serverName: a.serverName
+                });
+                break;
+            case 3: // Enter server
+                window.PPGAME.playerEnterServer({
+                    characterName: a.roleName,
+                    characterId: a.roleID,
+                    serverId: a.serverID,
+                    serverName: a.serverName
+                });
+                break;
+            case 4: // Level up
+                console.log("[PPGAME] report2Sdk dataType=4 (level up):", JSON.stringify(a));
+                window.PPGAME.gameLevelUp({
+                    level: a.level || a.roleLevel,
+                    characterName: a.roleName,
+                    characterId: a.roleID,
+                    serverId: a.serverID,
+                    serverName: a.serverName
+                });
+                break;
+            case 5: // Logout
+                console.log("[PPGAME] report2Sdk dataType=5 (logout):", JSON.stringify(a));
+                window.PPGAME.submitEvent("game_logout", {
+                    characterName: a.roleName,
+                    characterId: a.roleID,
+                    serverId: a.serverID,
+                    serverName: a.serverName
+                });
+                break;
+            default:
+                // Unknown dataType — tetap log dan kirim event
+                console.log("[PPGAME] report2Sdk dataType=" + a.dataType + " (unknown):", JSON.stringify(a));
+                window.PPGAME.submitEvent("game_report_" + a.dataType, a);
+                break;
+        }
+    };
+
+    // ============================================================
     //  WINDOW VALUES — dibaca TSBrowser.getVariantValue()
     //  Game mengakses: window[name] untuk mendapatkan config.
     //  Kita SET hanya kalau belum ada (supaya index.html bisa override).
@@ -631,12 +942,26 @@
     // --- SDK Version ---
     window.issdkVer2 = true;
 
+    // --- SDK Identifier ---
+    // Game mungkin baca window.sdk langsung via TSBrowser.getVariantValue("sdk")
+    if (typeof window.sdk === "undefined") {
+        window.sdk = "ppgame";
+    }
+
+    // --- SDK check function ---
+    // Pastikan checkSDK ada sebelum index.html define-nya
+    if (typeof window.checkSDK === "undefined") {
+        window.checkSDK = function () { return true; };
+    }
+
     // --- Game Config (hanya kalau belum di-set oleh index.html) ---
     if (typeof window.CacheNum === "undefined") window.CacheNum = 100;
-    if (typeof window.clientserver === "undefined") window.clientserver = GAME_SERVER;
+    if (typeof window.clientserver === "undefined") window.clientserver = GAME_SERVER_DEFAULT;
     if (typeof window.debugLanguage === "undefined") window.debugLanguage = "";
     if (typeof window.reportBattlleLog === "undefined") window.reportBattlleLog = false;
     if (typeof window.versionConfig === "undefined") window.versionConfig = {};
+    // sdkChannel di-set oleh index.html sebagai "en", tapi pastikan ada default
+    if (typeof window.sdkChannel === "undefined") window.sdkChannel = "en";
 
     // --- SDK Channel Config ---
     if (typeof window.sdkNativeChannel === "undefined") window.sdkNativeChannel = null;
@@ -646,8 +971,8 @@
     if (typeof window.showContact === "undefined") window.showContact = false;
     if (typeof window.showCurChannel === "undefined") window.showCurChannel = null;
     if (typeof window.userCenterSdk === "undefined") window.userCenterSdk = false;
-    if (typeof window.switchAccountSdk === "undefined") window.switchAccountSdk = true;  // Kita support switch
-    if (typeof window.switchUser === "undefined") window.switchUser = true;              // Kita support switch
+    if (typeof window.switchAccountSdk === "undefined") window.switchAccountSdk = true;
+    if (typeof window.switchUser === "undefined") window.switchUser = true;
 
     // --- Login UI Config ---
     if (typeof window.show18Login === "undefined") window.show18Login = false;
@@ -656,7 +981,23 @@
     if (typeof window.loginpic === "undefined") window.loginpic = "";
 
     // --- Server Config ---
-    if (typeof window.serverList === "undefined") window.serverList = {};
+    // serverList diisi dari SDK server settings (asynchronous)
+    // Default: satu server lokal
+    if (typeof window.serverList === "undefined") {
+        window.serverList = {
+            list: [
+                {
+                    id: "1",
+                    name: "Local Server",
+                    ip: "127.0.0.1",
+                    port: 8000,
+                    status: "normal",
+                    recommend: true,
+                    newTag: false
+                }
+            ]
+        };
+    }
     if (typeof window.replaceServerName === "undefined") window.replaceServerName = [];
     if (typeof window.hiddenServersRange === "undefined") window.hiddenServersRange = [];
 
@@ -677,6 +1018,127 @@
     if (typeof window.debugUrl === "undefined") window.debugUrl = "";
 
     // ============================================================
+    //  PAYMENT UI — Terasa nyata untuk user
+    // ============================================================
+
+    /** Tampilkan payment processing overlay */
+    function _showPaymentProcessing(orderData) {
+        // Hapus overlay lama kalau ada
+        var old = document.getElementById("ppgame-payment-overlay");
+        if (old) old.remove();
+
+        var productName = orderData.goodsName || orderData.productName || "Item";
+        var price = orderData.price || orderData.amount || 0;
+        var currency = orderData.currency || "USD";
+
+        var overlay = document.createElement("div");
+        overlay.id = "ppgame-payment-overlay";
+        overlay.style.cssText = [
+            "position: fixed",
+            "top: 0", "left: 0",
+            "width: 100%", "height: 100%",
+            "background: rgba(0,0,0,0.6)",
+            "z-index: 99999",
+            "display: flex",
+            "justify-content: center",
+            "align-items: center",
+            "font-family: Arial, sans-serif"
+        ].join(";");
+
+        var box = document.createElement("div");
+        box.style.cssText = [
+            "background: #1a1a2e",
+            "border: 2px solid #ffd700",
+            "border-radius: 12px",
+            "padding: 24px",
+            "min-width: 280px",
+            "max-width: 90%",
+            "color: #fff",
+            "text-align: center"
+        ].join(";");
+
+        var title = document.createElement("div");
+        title.innerHTML = "PROCESSING PAYMENT";
+        title.style.cssText = "color: #ffd700; font-size: 16px; font-weight: bold; margin-bottom: 16px; letter-spacing: 1px;";
+        box.appendChild(title);
+
+        var info = document.createElement("div");
+        info.innerHTML = productName + "<br><span style='color: #ffd700; font-size: 20px;'>" + price + " " + currency + "</span>";
+        info.style.cssText = "font-size: 14px; margin-bottom: 16px;";
+        box.appendChild(info);
+
+        var spinner = document.createElement("div");
+        spinner.innerHTML = "&#8987;"; // Hourglass
+        spinner.style.cssText = "font-size: 32px; animation: spin 2s linear infinite;";
+        box.appendChild(spinner);
+
+        // Add spin animation
+        if (!document.getElementById("ppgame-spin-style")) {
+            var style = document.createElement("style");
+            style.id = "ppgame-spin-style";
+            style.textContent = "@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }";
+            document.head.appendChild(style);
+        }
+
+        overlay.appendChild(box);
+        document.body.appendChild(overlay);
+    }
+
+    /** Tampilkan payment result (sukses/gagal) */
+    function _showPaymentResult(success, message) {
+        // Hapus processing overlay
+        var processing = document.getElementById("ppgame-payment-overlay");
+        if (processing) processing.remove();
+
+        var existing = document.getElementById("ppgame-payment-result");
+        if (existing) existing.remove();
+
+        var overlay = document.createElement("div");
+        overlay.id = "ppgame-payment-result";
+        overlay.style.cssText = [
+            "position: fixed",
+            "top: 0", "left: 0",
+            "width: 100%", "height: 100%",
+            "background: rgba(0,0,0,0.6)",
+            "z-index: 99999",
+            "display: flex",
+            "justify-content: center",
+            "align-items: center",
+            "font-family: Arial, sans-serif"
+        ].join(";");
+
+        var box = document.createElement("div");
+        box.style.cssText = [
+            "background: #1a1a2e",
+            "border: 2px solid " + (success ? "#4CAF50" : "#f44336"),
+            "border-radius: 12px",
+            "padding: 24px",
+            "min-width: 280px",
+            "max-width: 90%",
+            "color: #fff",
+            "text-align: center"
+        ].join(";");
+
+        var icon = document.createElement("div");
+        icon.innerHTML = success ? "&#10003;" : "&#10007;";
+        icon.style.cssText = "font-size: 48px; color: " + (success ? "#4CAF50" : "#f44336") + "; margin-bottom: 12px;";
+        box.appendChild(icon);
+
+        var msg = document.createElement("div");
+        msg.innerHTML = message || (success ? "Payment successful!" : "Payment failed");
+        msg.style.cssText = "font-size: 16px;";
+        box.appendChild(msg);
+
+        overlay.appendChild(box);
+        document.body.appendChild(overlay);
+
+        // Auto-hide setelah 2 detik
+        setTimeout(function () {
+            if (overlay.parentNode) overlay.remove();
+        }, 2000);
+    }
+
+    // ============================================================
     //  GUEST LOGIN UI
     //  Tombol GUEST muncul di halaman loading (maskloadinglayer)
     //  saat belum login.
@@ -694,6 +1156,13 @@
         _httpPost("/api/account/guest", { deviceId: _getDeviceId() }, function (res) {
             if (res && res.account) {
                 _setLogin(res.account);
+
+                // Update gameServerUrl dari settings jika ada
+                if (res.serverList && res.serverList.length > 0) {
+                    _state.gameServerUrl = (_serverSettings && _serverSettings.gameServerUrl) || GAME_SERVER_DEFAULT;
+                    _saveState();
+                }
+
                 console.log("[PPGAME] Guest login success:", res.account.nickname);
 
                 // Redirect dengan URL params supaya game bisa baca login info
@@ -714,7 +1183,11 @@
             }
         }, function (err) {
             console.error("[PPGAME] Guest login server error:", err);
-            _showLoginError("SDK server tidak bisa dijangkau.\nPastikan: node SDK/server.js (port 9999)");
+            var errorMsg = "SDK server tidak bisa dijangkau.\nPastikan: node sdk/server.js (port 9999)";
+            if (err && err.status === 429) {
+                errorMsg = "Terlalu banyak akun di perangkat ini.\nHapus akun lama atau hubungi admin.";
+            }
+            _showLoginError(errorMsg);
             if (btn) {
                 btn.style.opacity = "1";
                 btn.style.pointerEvents = "auto";
@@ -771,7 +1244,6 @@
         // Cari container loading screen
         var container = document.getElementById("maskloadinglayer");
         if (!container) {
-            // Container belum ada, coba lagi nanti
             return false;
         }
 
@@ -883,7 +1355,7 @@
     // ============================================================
 
     function _showAccountSwitchUI() {
-        _httpGet("/api/accounts", function (res) {
+        _httpGet("/api/accounts?deviceId=" + _getDeviceId(), function (res) {
             var accounts = res && res.accounts ? res.accounts : [];
             _renderAccountDialog(accounts);
         }, function () {
@@ -918,6 +1390,8 @@
             "padding: 24px",
             "min-width: 300px",
             "max-width: 90%",
+            "max-height: 80%",
+            "overflow-y: auto",
             "color: #fff",
             "text-align: center"
         ].join(";");
@@ -927,37 +1401,54 @@
         title.style.cssText = "color: #ffd700; margin: 0 0 16px 0; font-size: 20px; letter-spacing: 2px;";
         box.appendChild(title);
 
+        // Info akun saat ini
+        if (_state.nickname) {
+            var currentInfo = document.createElement("div");
+            currentInfo.innerHTML = "Current: <b style='color: #ffd700;'>" + _state.nickname + "</b>";
+            currentInfo.style.cssText = "font-size: 12px; color: #888; margin-bottom: 12px;";
+            box.appendChild(currentInfo);
+        }
+
         // List akun yang ada
         if (accounts.length > 0) {
             accounts.forEach(function (acc) {
                 var item = document.createElement("div");
-                item.innerHTML = (acc.nickname || acc.userId.slice(0, 8)) + (acc.type ? " (" + acc.type + ")" : "");
+                var isCurrent = acc.userId === _state.userId;
+                item.innerHTML = (acc.nickname || acc.userId.slice(0, 8)) +
+                    (acc.type ? " <span style='color:#888;font-size:11px;'>(" + acc.type + ")</span>" : "") +
+                    (isCurrent ? " <span style='color:#4CAF50;font-size:11px;'>ACTIVE</span>" : "");
                 item.style.cssText = [
                     "padding: 12px",
                     "margin: 6px 0",
-                    "background: #16213e",
-                    "border: 1px solid #333",
+                    "background: " + (isCurrent ? "#0f3460" : "#16213e"),
+                    "border: 1px solid " + (isCurrent ? "#ffd700" : "#333"),
                     "border-radius: 8px",
-                    "cursor: pointer",
+                    "cursor: " + (isCurrent ? "default" : "pointer"),
                     "transition: background 0.2s"
                 ].join(";");
-                item.addEventListener("mouseover", function () { item.style.background = "#0f3460"; });
-                item.addEventListener("mouseout", function () { item.style.background = "#16213e"; });
-                item.addEventListener("click", function () {
-                    _httpPost("/api/account/switch", { userId: acc.userId }, function (r) {
-                        if (r && r.account) {
-                            _setLogin(r.account);
-                            dialog.remove();
-                            // Redirect dengan URL params baru
-                            var url = window.location.origin + window.location.pathname;
-                            url += "?sdk=" + encodeURIComponent(_state.sdk);
-                            url += "&logintoken=" + encodeURIComponent(_state.loginToken);
-                            url += "&nickname=" + encodeURIComponent(_state.nickname);
-                            url += "&userid=" + encodeURIComponent(_state.userId);
-                            window.location.href = url;
-                        }
+
+                if (!isCurrent) {
+                    item.addEventListener("mouseover", function () { item.style.background = "#0f3460"; });
+                    item.addEventListener("mouseout", function () { item.style.background = "#16213e"; });
+                    item.addEventListener("click", function () {
+                        _httpPost("/api/account/switch", {
+                            userId: acc.userId,
+                            currentToken: _state.loginToken
+                        }, function (r) {
+                            if (r && r.account) {
+                                _setLogin(r.account);
+                                dialog.remove();
+                                // Redirect dengan URL params baru
+                                var url = window.location.origin + window.location.pathname;
+                                url += "?sdk=" + encodeURIComponent(_state.sdk);
+                                url += "&logintoken=" + encodeURIComponent(_state.loginToken);
+                                url += "&nickname=" + encodeURIComponent(_state.nickname);
+                                url += "&userid=" + encodeURIComponent(_state.userId);
+                                window.location.href = url;
+                            }
+                        });
                     });
-                });
+                }
                 box.appendChild(item);
             });
         } else {
@@ -1018,6 +1509,40 @@
     }
 
     // ============================================================
+    //  FETCH SETTINGS DARI SDK SERVER
+    //  Membaca gameServerUrl, serverList, dll secara dinamis
+    // ============================================================
+    var _serverSettings = null;
+
+    function _fetchSettings() {
+        _httpGet("/api/settings", function (res) {
+            if (res && res.settings) {
+                _serverSettings = res.settings;
+
+                // Update gameServerUrl dari server settings
+                if (res.settings.gameServerUrl) {
+                    _state.gameServerUrl = res.settings.gameServerUrl;
+                    _saveState();
+
+                    // Update window.clientserver juga
+                    if (typeof window.clientserver !== "undefined") {
+                        window.clientserver = res.settings.gameServerUrl;
+                    }
+                }
+
+                // Update serverList dari server settings
+                if (res.settings.serverList && res.settings.serverList.length > 0) {
+                    window.serverList = { list: res.settings.serverList };
+                }
+
+                console.log("[PPGAME] Settings loaded from server");
+            }
+        }, function () {
+            console.log("[PPGAME] Could not fetch settings from server — using defaults");
+        });
+    }
+
+    // ============================================================
     //  INIT — Setup & mulai SDK
     // ============================================================
 
@@ -1028,37 +1553,55 @@
         // 1. Pastikan bridge functions ada (fallback)
         _ensureBridgeFunctions();
 
-        // 2. Report init ke SDK server
+        // 2. Fetch settings dari SDK server
+        _fetchSettings();
+
+        // 3. Report init ke SDK server
         _httpPost("/api/init", {
             userId: _state.userId,
             nickname: _state.nickname,
+            loginToken: _state.loginToken,
             sdk: _state.sdk,
             deviceId: _getDeviceId(),
             version: SDK_VERSION
         }, function (res) {
-            if (res && res.userId && !_state.userId) {
-                // Server buatkan account untuk kita
-                _setLogin(res);
-                console.log("[PPGAME] Auto account from server:", res.userId);
+            if (res) {
+                // Jika server mengembalikan account info (auto-register)
+                if (res.userId && !_state.userId) {
+                    _setLogin(res);
+                    console.log("[PPGAME] Auto account from server:", res.userId);
+                }
+
+                // Update loginToken jika server memberikan yang baru
+                if (res.loginToken && res.userId === _state.userId) {
+                    _state.loginToken = res.loginToken;
+                    _saveState();
+                }
+
+                // Update serverList dari response
+                if (res.serverList && res.serverList.length > 0) {
+                    window.serverList = { list: res.serverList };
+                }
+
+                console.log("[PPGAME] Connected to SDK server");
             }
-            console.log("[PPGAME] Connected to SDK server");
         }, function () {
             console.log("[PPGAME] SDK server not reachable — running offline");
         });
 
-        // 3. Inject tombol Guest (tunggu DOM ready)
+        // 4. Inject tombol Guest (tunggu DOM ready)
         _tryInjectGuestButton();
 
         console.log("[PPGAME] SDK ready. Logged in:", _isLoggedIn(), _state.userId || "(not logged in)");
+        _sdkReady = true;
     }
 
     /** Coba inject guest button, retry kalau container belum ada */
     function _tryInjectGuestButton() {
-        if (_isLoggedIn()) return; // Sudah login, tidak perlu
+        if (_isLoggedIn()) return;
 
         var success = _injectGuestButton();
         if (!success) {
-            // Container belum ada, coba lagi setelah delay
             var attempts = 0;
             var interval = setInterval(function () {
                 attempts++;
