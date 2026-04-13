@@ -238,22 +238,8 @@ function saveSessions(data) {
 // =============================================
 
 /**
- * Hash password menggunakan PBKDF2
- * Lebih aman dari plain SHA-256 karena punya salt dan iterations
- *
- * @param {string} password - Plain password
- * @param {string} salt - Hex salt
- * @param {function} callback - callback(err, hash)
- */
-function hashPassword(password, salt, callback) {
-    crypto.pbkdf2(password, salt, HASH_ITERATIONS, HASH_KEY_LENGTH, 'sha512', function (err, derivedKey) {
-        if (err) return callback(err, null);
-        callback(null, derivedKey.toString('hex'));
-    });
-}
-
-/**
  * Hash password secara synchronous (untuk internal use)
+ * Uses PBKDF2-SHA512 — more secure than plain SHA-256
  * @param {string} password
  * @param {string} salt
  * @returns {string}
@@ -261,6 +247,125 @@ function hashPassword(password, salt, callback) {
 function hashPasswordSync(password, salt) {
     return crypto.pbkdf2Sync(password, salt, HASH_ITERATIONS, HASH_KEY_LENGTH, 'sha512').toString('hex');
 }
+
+// =============================================
+// BAGIAN 3B: RATE LIMITING (Simple In-Memory)
+// =============================================
+
+/**
+ * Rate limiter — simple in-memory sliding window.
+ * Tracks request counts per IP within a time window.
+ */
+var rateLimitStore = {};
+
+/**
+ * Check rate limit for a given key (IP address).
+ * @param {string} key - Rate limit key (e.g., IP address)
+ * @param {number} maxRequests - Max requests in window
+ * @param {number} windowMs - Time window in milliseconds
+ * @returns {{ allowed: boolean, remaining: number, retryAfterMs: number }}
+ */
+function checkRateLimit(key, maxRequests, windowMs) {
+    var now = Date.now();
+    var entry = rateLimitStore[key];
+
+    if (!entry || now - entry.windowStart > windowMs) {
+        // New window
+        rateLimitStore[key] = { count: 1, windowStart: now };
+        return { allowed: true, remaining: maxRequests - 1, retryAfterMs: 0 };
+    }
+
+    if (entry.count >= maxRequests) {
+        var retryAfterMs = windowMs - (now - entry.windowStart);
+        return { allowed: false, remaining: 0, retryAfterMs: retryAfterMs };
+    }
+
+    entry.count++;
+    return { allowed: true, remaining: maxRequests - entry.count, retryAfterMs: 0 };
+}
+
+/**
+ * Cleanup stale rate limit entries periodically
+ */
+setInterval(function () {
+    var now = Date.now();
+    var keys = Object.keys(rateLimitStore);
+    for (var i = 0; i < keys.length; i++) {
+        if (now - rateLimitStore[keys[i]].windowStart > 600000) { // 10 minutes
+            delete rateLimitStore[keys[i]];
+        }
+    }
+}, 300000); // every 5 minutes
+
+/**
+ * Rate limit middleware for Express.
+ * @param {number} maxRequests - Max requests per window
+ * @param {number} windowMs - Window duration in ms
+ */
+function rateLimitMiddleware(maxRequests, windowMs) {
+    return function (req, res, next) {
+        var key = req.ip || req.connection.remoteAddress || 'unknown';
+        var result = checkRateLimit(key, maxRequests, windowMs);
+
+        res.setHeader('X-RateLimit-Remaining', String(result.remaining));
+
+        if (!result.allowed) {
+            res.setHeader('Retry-After', String(Math.ceil(result.retryAfterMs / 1000)));
+            return res.status(429).json({
+                success: false,
+                message: 'Too many requests. Please try again in ' + Math.ceil(result.retryAfterMs / 1000) + ' seconds.'
+            });
+        }
+
+        next();
+    };
+}
+
+// =============================================
+// BAGIAN 3C: ANALYTICS ROTATION
+// =============================================
+
+var MAX_ANALYTICS_EVENTS = 50000;
+var ARCHIVE_DIR = path.join(DATA_DIR, 'archive');
+
+/**
+ * Rotate analytics file when it exceeds MAX_ANALYTICS_EVENTS.
+ * Archives old events to a timestamped file.
+ */
+function rotateAnalyticsIfNeeded() {
+    try {
+        var analyticsData = loadAnalytics();
+        var events = analyticsData.events || [];
+
+        if (events.length > MAX_ANALYTICS_EVENTS) {
+            // Create archive directory if needed
+            if (!fs.existsSync(ARCHIVE_DIR)) {
+                fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
+            }
+
+            // Archive the oldest 80% of events
+            var archiveCount = Math.floor(events.length * 0.8);
+            var archivedEvents = events.splice(0, archiveCount);
+
+            var archiveFilename = path.join(ARCHIVE_DIR, 'analytics_' + new Date().toISOString().replace(/[:.]/g, '-') + '.json');
+            saveJSON(archiveFilename, {
+                archivedAt: new Date().toISOString(),
+                eventCount: archivedEvents.length,
+                events: archivedEvents
+            });
+
+            analyticsData.events = events;
+            saveAnalytics(analyticsData);
+
+            console.log('[Analytics] Rotated ' + archiveCount + ' events to archive (remaining: ' + events.length + ')');
+        }
+    } catch (e) {
+        console.error('[Analytics] Rotation error:', e.message);
+    }
+}
+
+// Run analytics rotation every 30 minutes
+setInterval(rotateAnalyticsIfNeeded, 30 * 60 * 1000);
 
 /**
  * Generate random salt (32 bytes hex)
@@ -412,6 +517,98 @@ function cleanupExpiredSessions() {
 }
 
 // =============================================
+// BUG FIX #4: Report endpoints — sdk.js sends to /api/report/batch
+// but only /api/analytics/event existed. Added both /api/report/event
+// and /api/report/batch to handle SDK report queue flush.
+// =============================================
+
+// -------------------------------------------------
+// 6.0A POST /api/report/event
+// Single report event dari sdk.js (fire-and-forget)
+// Mirrors /api/analytics/event but under /api/report path
+// -------------------------------------------------
+app.post('/api/report/event', function (req, res) {
+    var event = req.body;
+    if (!event || !event.eventType) {
+        return res.json({ success: true });
+    }
+
+    var analyticsData = loadAnalytics();
+    if (!analyticsData.events) analyticsData.events = [];
+    if (!analyticsData.meta) analyticsData.meta = { totalEvents: 0, lastFlush: '' };
+
+    analyticsData.events.push({
+        category: event.category || 'report',
+        action: event.eventType,
+        data: event.eventData || event.data || {},
+        userId: event.userId || null,
+        sessionId: event.sessionId || null,
+        serverId: event.serverId || null,
+        serverName: event.serverName || null,
+        characterId: event.characterId || null,
+        characterName: event.characterName || null,
+        characterLevel: event.characterLevel || null,
+        sdk: event.sdk || 'unknown',
+        appId: event.appId || null,
+        pageUrl: event.pageUrl || null,
+        timestamp: event.timestamp || new Date().toISOString(),
+        receivedAt: new Date().toISOString()
+    });
+
+    analyticsData.meta.totalEvents = (analyticsData.meta.totalEvents || 0) + 1;
+    analyticsData.meta.lastFlush = new Date().toISOString();
+
+    saveAnalytics(analyticsData);
+    return res.json({ success: true });
+});
+
+// -------------------------------------------------
+// 6.0B POST /api/report/batch
+// Batch report dari sdk.js — menerima array of reports
+// Dipanggil oleh sdk.js flushReportQueue()
+// Request: { reports: [...], timestamp: string }
+// -------------------------------------------------
+app.post('/api/report/batch', function (req, res) {
+    var body = req.body;
+    if (!body || !Array.isArray(body.reports) || body.reports.length === 0) {
+        return res.json({ success: true });
+    }
+
+    var analyticsData = loadAnalytics();
+    if (!analyticsData.events) analyticsData.events = [];
+    if (!analyticsData.meta) analyticsData.meta = { totalEvents: 0, lastFlush: '' };
+
+    var reports = body.reports;
+    for (var i = 0; i < reports.length; i++) {
+        var r = reports[i];
+        analyticsData.events.push({
+            id: r.id || null,
+            category: r.category || 'report',
+            action: r.eventType || 'unknown',
+            data: r.eventData || {},
+            userId: r.userId || null,
+            sessionId: r.sessionId || null,
+            serverId: r.serverId || null,
+            serverName: r.serverName || null,
+            characterId: r.characterId || null,
+            characterName: r.characterName || null,
+            characterLevel: r.characterLevel || null,
+            sdk: r.sdk || 'unknown',
+            appId: r.appId || null,
+            pageUrl: r.pageUrl || null,
+            timestamp: r.timestamp || new Date().toISOString(),
+            receivedAt: new Date().toISOString()
+        });
+    }
+
+    analyticsData.meta.totalEvents = (analyticsData.meta.totalEvents || 0) + reports.length;
+    analyticsData.meta.lastFlush = new Date().toISOString();
+
+    saveAnalytics(analyticsData);
+    return res.json({ success: true, count: reports.length });
+});
+
+// =============================================
 // BAGIAN 6: API ENDPOINTS
 // =============================================
 
@@ -457,6 +654,7 @@ function formatUptime(seconds) {
 // -------------------------------------------------
 // 6.2 POST /api/auth/register
 // Registrasi user baru
+// Rate limited: 5 requests per 60 seconds per IP
 //
 // Request: { username: string, password: string }
 // Response: { success: true, data: { userId, sign, sdk, loginToken, nickName, security } }
@@ -470,7 +668,7 @@ function formatUptime(seconds) {
 //   5. Buat session
 //   6. Return session data → sdk.js redirect ke game dengan URL params
 // -------------------------------------------------
-app.post('/api/auth/register', function (req, res) {
+app.post('/api/auth/register', rateLimitMiddleware(5, 60000), function (req, res) {
     var username = sanitizeUsername(req.body.username);
     var password = req.body.password;
 
@@ -558,6 +756,7 @@ app.post('/api/auth/register', function (req, res) {
 // -------------------------------------------------
 // 6.3 POST /api/auth/login
 // Login user yang sudah terdaftar
+// Rate limited: 10 requests per 60 seconds per IP
 //
 // Request: { username: string, password: string }
 // Response: { success: true, data: { userId, sign, sdk, loginToken, nickName, security } }
@@ -572,7 +771,7 @@ app.post('/api/auth/register', function (req, res) {
 //   6. Buat session baru
 //   7. Return session data → sdk.js redirect ke game
 // -------------------------------------------------
-app.post('/api/auth/login', function (req, res) {
+app.post('/api/auth/login', rateLimitMiddleware(10, 60000), function (req, res) {
     var username = sanitizeUsername(req.body.username);
     var password = req.body.password;
 
@@ -1028,6 +1227,7 @@ app.get('/api/config', function (req, res) {
 // -------------------------------------------------
 // 6.13 POST /api/auth/guest
 // Guest login — login tanpa username/password
+// Rate limited: 10 requests per 60 seconds per IP
 //
 // Request: { channel: string, appId: string, deviceId: string }
 // Response: { success: true, data: { userId, sign, sdk, loginToken, nickName, security } }
@@ -1040,7 +1240,7 @@ app.get('/api/config', function (req, res) {
 //   5. Generate token baru (loginToken, sign, security)
 //   6. Return session data
 // -------------------------------------------------
-app.post('/api/auth/guest', function (req, res) {
+app.post('/api/auth/guest', rateLimitMiddleware(10, 60000), function (req, res) {
     var deviceId = req.body.deviceId;
     var channel = req.body.channel || DEFAULT_SDK_CHANNEL;
     var appId = req.body.appId || DEFAULT_APP_ID;
@@ -1072,6 +1272,7 @@ app.post('/api/auth/guest', function (req, res) {
             salt: salt,
             nickname: guestUsername,
             sdk: channel,
+            appId: appId,
             deviceId: deviceId,
             isGuest: true,
             createdAt: new Date().toISOString(),
@@ -1093,6 +1294,10 @@ app.post('/api/auth/guest', function (req, res) {
     user.sign = sign;
     user.security = security;
     user.sdk = channel;
+    // Store appId if provided
+    if (appId) {
+        user.appId = appId;
+    }
 
     if (!saveUsers(usersData)) {
         return res.json({
@@ -1113,6 +1318,7 @@ app.post('/api/auth/guest', function (req, res) {
             userId: user.id,
             sign: sign,
             sdk: channel,
+            appId: appId,
             loginToken: loginToken,
             nickName: user.nickname || user.username,
             security: security,
