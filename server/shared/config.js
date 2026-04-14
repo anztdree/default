@@ -84,6 +84,12 @@ const config = {
         connectionLimit: parseInt(process.env.DB_CONNECTION_LIMIT) || 10,
     },
 
+    // FIX 12: Client uses sdkChannel='ppgame' and appId='288'
+    // From client: ts.loginInfo.userInfo.channelCode (ppgame) and subChannel (288)
+    // These defaults are used by SDK server when registering new users
+    sdkChannel: process.env.SDK_CHANNEL || 'ppgame',
+    appId: process.env.APP_ID || '288',
+
     // ============================================
     // Protocol version (from client: version: "1.0")
     // ============================================

@@ -59,10 +59,17 @@ function success(dataObj, compress) {
 
     if (dataObj !== undefined && dataObj !== null) {
         dataStr = JSON.stringify(dataObj);
+        // FIX 6: Auto-compress when data is large enough (> 200 chars)
+        // Client supports LZString.decompressFromUTF16() when compress=true
+        if (compress === undefined) {
+            compress = dataStr.length > 200;
+        }
         if (compress) {
             var lzHelper = require('./lzHelper');
             dataStr = lzHelper.compressData(dataStr);
         }
+    } else {
+        compress = false;
     }
 
     return {
@@ -122,10 +129,14 @@ function error(code, dataStr) {
  * @returns {object} Push response
  */
 function push(dataObj) {
+    var now = Date.now();
     return {
         ret: 'SUCCESS',   // String "SUCCESS" for push/notify (NOT number 0)
         data: JSON.stringify(dataObj || {}),
         action: dataObj ? dataObj.action : undefined,
+        // FIX 6: Add serverTime and server0Time to push responses (client expects these)
+        serverTime: now,
+        server0Time: now,
     };
 }
 
@@ -209,11 +220,13 @@ function sendResponse(socket, event, response, callback) {
 
 // Common error codes from errorDefine.json
 var ErrorCode = {
+    UNKNOWN_ERROR: 1,
     UNKNOWN: 1,
     STATE_ERROR: 2,
     DATA_ERROR: 3,
     INVALID: 4,
     INVALID_COMMAND: 5,
+    SESSION_EXPIRED: 6,
     LACK_PARAM: 8,
     USER_LOGIN_BEFORE: 12,
     USER_NOT_LOGIN_BEFORE: 13,
