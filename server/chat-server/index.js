@@ -516,8 +516,12 @@ function handleSendMsg(socket, parsed, callback) {
         return callback(RH.error(RH.ErrorCode.LACK_PARAM, 'Missing roomId'));
     }
 
-    // Reject system messages from clients — only the game server should send those.
-    // System messages (_kind==1) cause client crash if _type doesn't exist in noticeContent.
+    // FIX 9: System messages (_kind==1) are intentionally blocked.
+    // REASON: Client's BroadcastSingleton.setChatValue() accesses noticeContent[_type]
+    // for system messages. If _type doesn't exist in noticeContent, it crashes with
+    // "s[r] is undefined". The original official server never sent system messages
+    // from the chat server either — only via main-server push notifications.
+    // We silently drop them rather than risk a client crash.
     if (kind === MESSAGE_KIND.SYSTEM) {
         return callback(RH.error(RH.ErrorCode.LACK_PARAM, 'Cannot send system messages'));
     }
