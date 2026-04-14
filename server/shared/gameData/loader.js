@@ -71,6 +71,35 @@ class GameDataLoader {
     isLoaded() {
         return this.loaded;
     }
+
+    /**
+     * Load all game data JSON files from the default resource/json directory.
+     * Called by main-server/index.js on startup: GameData.load()
+     *
+     * The default path is relative to the project root (server/../resource/json).
+     * This matches the client's ReadJsonSingleton which reads from resource/json/.
+     *
+     * @returns {Promise<void>}
+     */
+    async load() {
+        // Default path: project_root/resource/json
+        // server/shared/gameData/loader.js → ../../resource/json
+        var defaultDir = path.resolve(__dirname, '..', '..', '..', 'resource', 'json');
+        this.loadFromDirectory(defaultDir);
+    }
+
+    /**
+     * Get statistics about loaded game data.
+     * Called by main-server/index.js: GameData.getStats()
+     *
+     * @returns {{ fileCount: number, loadTimeMs: number }} Stats object
+     */
+    getStats() {
+        return {
+            fileCount: Object.keys(this.data).length,
+            loadTimeMs: 0, // Not tracked at this level; loaders handle timing
+        };
+    }
 }
 
 // Singleton
