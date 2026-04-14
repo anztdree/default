@@ -250,6 +250,10 @@ async function enterGame(socket, parsed, callback) {
         // which reads response.currency, response.user, response.heros, etc. directly.
         callback(RH.success(playerData));
 
+        // FIX 16: Set socket._userId after enterGame so other handlers can use it
+        // (e.g., exitGame uses socket._userId as fallback when parsed.userId is missing)
+        socket._userId = userId;
+
         logger.info('USER', 'enterGame: success for userId=' + userId + ', newUser=' + isNewPlayer);
 
     } catch (err) {
@@ -310,15 +314,18 @@ async function registChat(socket, parsed, callback) {
  */
 async function exitGame(socket, parsed, callback) {
     var userId = parsed.userId || socket._userId;
+    var serverId = parsed.serverId || 1;
 
-    logger.info('USER', 'exitGame: userId=' + userId);
+    logger.info('USER', 'exitGame: userId=' + userId + ', serverId=' + serverId);
 
     try {
-        // Clean up online status
+        // FIX 16: Add server_id filter to online cleanup DELETE query
+        // Without server_id filter, exiting one server would clear online status
+        // on all servers for this user.
         if (userId) {
             await DB.query(
-                'DELETE FROM user_online WHERE user_id = ?',
-                [userId]
+                'DELETE FROM user_online WHERE user_id = ? AND server_id = ?',
+                [userId, serverId]
             );
         }
     } catch (err) {
