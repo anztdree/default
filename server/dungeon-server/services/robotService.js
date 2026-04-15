@@ -13,7 +13,7 @@
 
 'use strict';
 
-var GameData = require('../../server/shared/gameData/loader');
+var GameData = require('../../shared/gameData/loader');
 var logger = require('../../shared/utils/logger');
 
 /**
