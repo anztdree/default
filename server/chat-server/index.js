@@ -2,64 +2,32 @@
  * =====================================================
  *  Chat Server — Super Warrior Z Game Server
  *  Port 8002
+ * =====================================================
  *
- *  Chat server khusus menangani:
- *    1. TEA handshake verification (verifyEnable=true)
- *    2. Chat login (userId + serverId)
- *    3. Room management (join/leave rooms)
- *    4. Message routing (world, guild, private, team, world_team)
- *    5. Message history (getRecord)
- *    6. Push notifications via "Notify" event
- *    7. Chat ban/mute enforcement
+ *  Slim entry point. All logic delegated to modules:
+ *    - middleware/chatAuth.js    → TEA verification
+ *    - handlers/login.js        → chat login
+ *    - handlers/joinRoom.js      → join room
+ *    - handlers/leaveRoom.js     → leave room
+ *    - handlers/sendMsg.js       → send message + broadcast
+ *    - handlers/getRecord.js     → message history
+ *    - services/roomManager.js   → room lifecycle
+ *    - services/messageStore.js  → message history storage
+ *    - services/userManager.js   → connected users + ban
+ *    - utils/chatConstants.js    → enums, limits, config
+ *    - utils/messageBuilder.js   → message factory
+ *    - utils/rateLimiter.js      → anti-spam
  *
- *  CLIENT CHAT PROTOCOL (from main.min.js analysis):
- *
- *  FLOW:
- *    1. Client calls registChat on main-server → gets _chatServerUrl, room IDs
- *    2. Client connects to chat-server via Socket.IO
- *    3. TEA verify handshake (same as main-server)
- *    4. Client sends: { type:"chat", action:"login", userId, serverId, version }
- *    5. Client joins rooms: { type:"chat", action:"joinRoom", userId, roomId }
- *    6. Client sends messages: { type:"chat", action:"sendMsg", userId, kind, content, msgType, param, roomId }
- *    7. Server pushes new messages via "Notify" event
+ *  PROTOCOL:
+ *    All requests via: socket.emit("handler.process", {type:"chat", action, ...}, callback)
+ *    All pushes via:   socket.emit("Notify", {ret:"SUCCESS", data:{_msg:{...}}})
  *
  *  ACTIONS:
- *    - login      → authenticate user, return ban status
- *    - joinRoom   → join a chat room, return recent messages
- *    - leaveRoom  → leave a chat room
- *    - sendMsg    → send message to room, broadcast to all members
- *    - getRecord  → fetch message history for a room
- *
- *  ROOM TYPES (MESSAGE_KIND enum from client line 79292):
- *    0 = MK_NULL
- *    1 = SYSTEM
- *    2 = WORLD
- *    3 = GUILD
- *    4 = PRIVATE
- *    5 = WORLD_TEAM (team dungeon)
- *    6 = TEAM
- *
- *  CHAT MESSAGE FORMAT (from ChatDataBaseClass line 58685):
- *    {
- *      _time: number,
- *      _kind: number,        // MESSAGE_KIND
- *      _name: string,        // sender nickName
- *      _content: string,     // message text
- *      _id: string,          // sender userId
- *      _image: string,       // sender head image
- *      _param: object,       // extra params
- *      _type: number,        // msgType / SYSTEM_MESSAGE_TYPE
- *      _headEffect: object,
- *      _headBox: number,     // head box ID
- *      _oriServerId: number,
- *      _serverId: number
- *    }
- *
- *  PUSH FORMAT (Notify event):
- *    { ret: "SUCCESS", data: JSON.stringify({_msg: chatMessageObj}), compress: false }
- *
- *  ERROR CODES:
- *    36001 = chat forbidden/muted
+ *    login     → authenticate user
+ *    joinRoom  → join room, return recent messages (_record)
+ *    leaveRoom → leave room
+ *    sendMsg   → send message, broadcast Notify to room
+ *    getRecord → fetch message history (_record)
  *
  *  Usage:
  *    node chat-server/index.js
@@ -69,6 +37,11 @@
 'use strict';
 
 var http = require('http');
+
+// =============================================
+// 1. CONFIGURATION
+// =============================================
+
 var config = require('../shared/config');
 config.validateConfig();
 
@@ -76,531 +49,63 @@ var SERVER_PORT = config.config.servers.chat.port;
 var SERVER_HOST = config.config.servers.chat.host;
 var TEA_KEY = config.config.security.teaKey || 'verification';
 
+// =============================================
+// 2. SHARED MODULES
+// =============================================
+
 var RH = require('../shared/responseHelper');
-var TEA = require('../shared/tea');
 var DB = require('../database/connection');
 var logger = require('../shared/utils/logger');
 
-console.log('');
-console.log('================================================');
-console.log('  Super Warrior Z — Chat Server');
-console.log('================================================');
-
 // =============================================
-// 1. ROOM & MESSAGE STORAGE
+// 3. CHAT-SERVER MODULES
 // =============================================
 
-/**
- * In-memory room storage.
- * Key: roomId (number)
- * Value: Set of socket IDs
- *
- * @type {Object.<number, Set<string>>}
- */
-var rooms = {};
+var chatAuth = require('./middleware/chatAuth');
+var chatConstants = require('./utils/chatConstants');
 
-/**
- * In-memory message history per room.
- * Key: roomId (number)
- * Value: Array of chat message objects (max 60 per room, matching client limit)
- *
- * @type {Object.<number, Array>}
- */
-var roomMessages = {};
+var createRoomManager = require('./services/roomManager').createRoomManager;
+var createMessageStore = require('./services/messageStore').createMessageStore;
+var createUserManager = require('./services/userManager').createUserManager;
+var createRateLimiter = require('./utils/rateLimiter').createRateLimiter;
 
-/** @type {number} Max messages stored per room */
-var MAX_MESSAGES_PER_ROOM = 60;
-
-/**
- * Map socket → userId for looking up user info on disconnect.
- *
- * @type {Object.<string, object>}
- */
-var socketUsers = {};
-
-/**
- * Map userId → socket for direct private messaging and ban checks.
- *
- * @type {Object.<string, object>}
- */
-var connectedUsers = {};
+// Handler modules
+var handleLogin = require('./handlers/login').handle;
+var handleJoinRoom = require('./handlers/joinRoom').handle;
+var handleLeaveRoom = require('./handlers/leaveRoom').handle;
+var handleSendMsg = require('./handlers/sendMsg').handle;
+var handleGetRecord = require('./handlers/getRecord').handle;
 
 // =============================================
-// 2. CONNECTION TRACKING
+// 4. INITIALIZE SERVICES
 // =============================================
 
-/** @type {number} */
-var totalConnections = 0;
-/** @type {number} */
-var activeConnections = 0;
+var roomManager = createRoomManager();
+var messageStore = createMessageStore();
+var userManager = createUserManager();
+var rateLimiter = createRateLimiter();
 
-// =============================================
-// 3. TEA VERIFICATION CONFIGURATION
-// =============================================
-
-var VERIFY_TIMEOUT = 15000;
-var VERIFY_MAX_ATTEMPTS = 3;
-
-// =============================================
-// 4. MESSAGE_KIND ENUM
-// =============================================
-
-var MESSAGE_KIND = {
-    NULL: 0,
-    SYSTEM: 1,
-    WORLD: 2,
-    GUILD: 3,
-    PRIVATE: 4,
-    WORLD_TEAM: 5,
-    TEAM: 6,
+// Dependencies object passed to handlers
+var deps = {
+    roomManager: roomManager,
+    messageStore: messageStore,
+    userManager: userManager,
+    rateLimiter: rateLimiter,
+    io: null,  // set after Socket.IO init
 };
 
 // =============================================
-// 5. HELPER FUNCTIONS
+// 5. CONNECTION TRACKING
 // =============================================
 
-/**
- * Add a socket to a room.
- */
-function joinRoom(roomId, socketId) {
-    if (!rooms[roomId]) {
-        rooms[roomId] = new Set();
-    }
-    rooms[roomId].add(socketId);
-
-    if (!roomMessages[roomId]) {
-        roomMessages[roomId] = [];
-    }
-}
-
-/**
- * Remove a socket from a room.
- */
-function leaveRoom(roomId, socketId) {
-    if (rooms[roomId]) {
-        rooms[roomId].delete(socketId);
-        // Clean up empty rooms
-        if (rooms[roomId].size === 0) {
-            delete rooms[roomId];
-            // Keep messages for a while even if room is empty
-        }
-    }
-}
-
-/**
- * Remove a socket from ALL rooms.
- */
-function leaveAllRooms(socketId) {
-    for (var roomId in rooms) {
-        if (rooms.hasOwnProperty(roomId)) {
-            rooms[roomId].delete(socketId);
-        }
-    }
-}
-
-/**
- * Store a message in room history.
- */
-function storeMessage(roomId, message) {
-    if (!roomMessages[roomId]) {
-        roomMessages[roomId] = [];
-    }
-    roomMessages[roomId].push(message);
-
-    // Enforce max limit (client also limits to 60)
-    if (roomMessages[roomId].length > MAX_MESSAGES_PER_ROOM) {
-        roomMessages[roomId].splice(0, roomMessages[roomId].length - MAX_MESSAGES_PER_ROOM);
-    }
-}
-
-/**
- * Broadcast a push notification to all sockets in a room.
- * Uses the "Notify" event which the client listens for.
- *
- * CLIENT CODE (line 51963-51964):
- *   this.socket.on("Notify", e)
- *
- * PUSH FORMAT (line 77204-77216):
- *   { ret: "SUCCESS", data: JSON.stringify({_msg: chatObj}), compress: false }
- *
- * @param {number} roomId
- * @param {object} chatMessage - The chat message object
- * @param {object} io - Socket.IO instance
- */
-function broadcastToRoom(roomId, chatMessage, io) {
-    if (!rooms[roomId]) return;
-
-    var pushData = RH.push({ _msg: chatMessage });
-
-    rooms[roomId].forEach(function (socketId) {
-        var sock = io.sockets.sockets[socketId];
-        if (sock && sock.connected && sock._verified) {
-            sock.emit('Notify', pushData);
-        }
-    });
-}
-
-/**
- * Check if a user is chat-banned.
- * Ban data comes from main-server via forbiddenChat field.
- * We cache ban data locally when user logs in.
- *
- * @param {string} userId
- * @returns {boolean} true if user is currently banned
- */
-function isUserBanned(userId) {
-    var userInfo = connectedUsers[userId];
-    if (!userInfo) return false;
-
-    var banInfo = userInfo.forbiddenChat;
-    if (!banInfo || !banInfo.finishTime) return false;
-
-    var finishTime = banInfo.finishTime[userId];
-    if (finishTime === undefined) return false;
-
-    // 0 = permanent ban
-    if (finishTime === 0) return true;
-
-    // Check if ban has expired
-    if (finishTime > Date.now()) return true;
-
-    return false;
-}
-
-/**
- * Build a chat message object matching client's ChatDataBaseClass format.
- *
- * @param {object} senderInfo - { userId, nickName, headImage, headBox, serverId, oriServerId }
- * @param {number} kind - MESSAGE_KIND
- * @param {string} content - Message text
- * @param {number} msgType - Message sub-type
- * @param {object} param - Extra params
- * @param {number} time - Server timestamp
- * @returns {object}
- */
-function buildChatMessage(senderInfo, kind, content, msgType, param, time) {
-    return {
-        _time: time || Date.now(),
-        _kind: kind,
-        _name: senderInfo.nickName || senderInfo.userId || '',
-        _content: content || '',
-        _id: senderInfo.userId || '',
-        _image: senderInfo.headImage || '',
-        _param: param || null,
-        _type: msgType || 0,
-        _headEffect: null,
-        _headBox: senderInfo.headBox || 0,
-        _oriServerId: senderInfo.oriServerId || senderInfo.serverId || 0,
-        _serverId: senderInfo.serverId || 0,
-    };
-}
-
-/**
- * Build system message (e.g., user joined, user left).
- *
- * @param {string} content
- * @param {number} roomId
- * @param {number} sysType
- * @returns {object}
- */
-function buildSystemMessage(content, roomId, sysType) {
-    return {
-        _time: Date.now(),
-        _kind: MESSAGE_KIND.SYSTEM,
-        _name: 'System',
-        _content: content,
-        _id: '0',
-        _image: '',
-        _param: null,
-        _type: sysType || 0,
-        _headEffect: null,
-        _headBox: 0,
-        _oriServerId: 0,
-        _serverId: 0,
-    };
-}
+var totalConnections = 0;
+var activeConnections = 0;
 
 // =============================================
-// 6. ACTION HANDLERS
+// 6. CREATE HTTP SERVER
 // =============================================
 
-/**
- * chatLogin — First action after TEA verify.
- *
- * CLIENT CODE (line 77445-77489):
- *   ts.processHandlerWithChat({
- *       type: "chat",
- *       action: "login",
- *       userId: UserInfoSingleton.getInstance().userId,
- *       serverId: UserInfoSingleton.getInstance().getServerId(),
- *       version: "1.0"
- *   }, callback)
- *
- * After login success, client joins rooms via chatJoinRequest.
- *
- * @param {object} socket
- * @param {object} parsed
- * @param {function} callback
- */
-async function handleChatLogin(socket, parsed, callback) {
-    var userId = parsed.userId;
-    var serverId = parsed.serverId || 1;
-
-    if (!userId) {
-        return callback(RH.error(RH.ErrorCode.LACK_PARAM, 'Missing userId'));
-    }
-
-    logger.info('CHAT', 'login: userId=' + userId + ', serverId=' + serverId);
-
-    try {
-        // Load user info from database
-        var userInfo = { userId: userId, serverId: serverId };
-
-        try {
-            var rows = await DB.query(
-                'SELECT user_id, nick_name, head_image, ori_server_id FROM users WHERE user_id = ?',
-                [userId]
-            );
-            if (rows.length > 0) {
-                userInfo.nickName = rows[0].nick_name || userId;
-                userInfo.headImage = rows[0].head_image || '';
-                userInfo.oriServerId = rows[0].ori_server_id || serverId;
-                userInfo.headBox = 0;
-            } else {
-                userInfo.nickName = userId;
-                userInfo.headImage = '';
-                userInfo.oriServerId = serverId;
-                userInfo.headBox = 0;
-            }
-        } catch (dbErr) {
-            logger.warn('CHAT', 'login: DB lookup failed, using defaults: ' + dbErr.message);
-            userInfo.nickName = userId;
-            userInfo.headImage = '';
-            userInfo.oriServerId = serverId;
-            userInfo.headBox = 0;
-        }
-
-        // Store user info
-        socket._userId = userId;
-        socket._userInfo = userInfo;
-        socketUsers[socket.id] = userInfo;
-        connectedUsers[userId] = {
-            socket: socket,
-            userInfo: userInfo,
-            forbiddenChat: null,
-            rooms: new Set(),
-        };
-
-        logger.info('CHAT', 'login success: userId=' + userId + ', nick=' + userInfo.nickName);
-        callback(RH.success({}));
-
-    } catch (err) {
-        logger.error('CHAT', 'login error for userId=' + userId + ': ' + err.message);
-        callback(RH.error(RH.ErrorCode.UNKNOWN, 'Login failed'));
-    }
-}
-
-/**
- * joinRoom — Join a chat room.
- *
- * CLIENT CODE (line 77490-77499):
- *   ts.processHandlerWithChat({
- *       type: "chat",
- *       action: "joinRoom",
- *       userId: UserInfoSingleton.getInstance().userId,
- *       roomId: e,
- *       version: "1.0"
- *   }, function(e) { ... e._record = [...] })
- *
- * Response: { _record: [recentMessages] }
- *
- * @param {object} socket
- * @param {object} parsed - { userId, roomId }
- * @param {function} callback
- */
-function handleJoinRoom(socket, parsed, callback) {
-    var userId = parsed.userId;
-    var roomId = parsed.roomId;
-
-    if (!roomId) {
-        return callback(RH.error(RH.ErrorCode.LACK_PARAM, 'Missing roomId'));
-    }
-
-    logger.info('CHAT', 'joinRoom: userId=' + userId + ', roomId=' + roomId);
-
-    // Add socket to room
-    joinRoom(roomId, socket.id);
-
-    // Track room in user's room list
-    if (connectedUsers[userId]) {
-        connectedUsers[userId].rooms.add(roomId);
-    }
-
-    // NOTE: Do NOT send system message on join.
-    // Client BroadcastSingleton.setChatValue() accesses noticeContent[_type]
-    // for system messages (_kind==1), and if _type doesn't exist in
-    // noticeContent, it crashes: "s[r] is undefined".
-    // Only return recent messages for the room.
-    var record = roomMessages[roomId] || [];
-    callback(RH.success({ _record: record }));
-}
-
-/**
- * leaveRoom — Leave a chat room.
- *
- * CLIENT CODE (line 77500-77509):
- *   ts.processHandlerWithChat({
- *       type: "chat",
- *       action: "leaveRoom",
- *       userId: UserInfoSingleton.getInstance().userId,
- *       roomId: e,
- *       version: "1.0"
- *   }, callback)
- *
- * @param {object} socket
- * @param {object} parsed - { userId, roomId }
- * @param {function} callback
- */
-function handleLeaveRoom(socket, parsed, callback) {
-    var userId = parsed.userId;
-    var roomId = parsed.roomId;
-
-    if (!roomId) {
-        return callback(RH.error(RH.ErrorCode.LACK_PARAM, 'Missing roomId'));
-    }
-
-    logger.info('CHAT', 'leaveRoom: userId=' + userId + ', roomId=' + roomId);
-
-    leaveRoom(roomId, socket.id);
-
-    if (connectedUsers[userId]) {
-        connectedUsers[userId].rooms.delete(roomId);
-    }
-
-    callback(RH.success({}));
-}
-
-/**
- * sendMsg — Send a chat message to a room.
- *
- * CLIENT CODE (line 52852-52874):
- *   ts.processHandlerWithChat({
- *       type: "chat",
- *       action: "sendMsg",
- *       userId: UserInfoSingleton.getInstance().userId,
- *       kind: n,           // MESSAGE_KIND (2=WORLD, 3=GUILD, 5=WORLD_TEAM, 6=TEAM)
- *       content: t,        // message text
- *       msgType: a,        // message sub-type
- *       param: r,          // extra params
- *       roomId: i,         // target room ID
- *       version: "1.0"
- *   }, function(e) { e._time }, errorCallback)
- *
- * ERROR: ret=36001 → chat forbidden/muted
- * RESPONSE: { _time: serverTimestamp }
- * BROADCAST: Notify event with { ret:"SUCCESS", data: {_msg: chatObj} }
- *
- * @param {object} socket
- * @param {object} parsed - { userId, kind, content, msgType, param, roomId }
- * @param {function} callback
- */
-function handleSendMsg(socket, parsed, callback) {
-    var userId = parsed.userId;
-    var kind = parsed.kind || MESSAGE_KIND.WORLD;
-    var content = parsed.content || '';
-    var msgType = parsed.msgType || 0;
-    var param = parsed.param || null;
-    var roomId = parsed.roomId;
-
-    if (!roomId) {
-        return callback(RH.error(RH.ErrorCode.LACK_PARAM, 'Missing roomId'));
-    }
-
-    // FIX 9: System messages (_kind==1) are intentionally blocked.
-    // REASON: Client's BroadcastSingleton.setChatValue() accesses noticeContent[_type]
-    // for system messages. If _type doesn't exist in noticeContent, it crashes with
-    // "s[r] is undefined". The original official server never sent system messages
-    // from the chat server either — only via main-server push notifications.
-    // We silently drop them rather than risk a client crash.
-    if (kind === MESSAGE_KIND.SYSTEM) {
-        return callback(RH.error(RH.ErrorCode.LACK_PARAM, 'Cannot send system messages'));
-    }
-
-    if (!content) {
-        return callback(RH.error(RH.ErrorCode.LACK_PARAM, 'Missing content'));
-    }
-
-    // Check chat ban (error 36001)
-    if (isUserBanned(userId)) {
-        logger.warn('CHAT', 'sendMsg: user is BANNED userId=' + userId);
-        return callback(RH.error(36001, 'Chat forbidden'));
-    }
-
-    var now = Date.now();
-    var userInfo = socket._userInfo || { userId: userId, nickName: userId };
-
-    // Build the chat message
-    var chatMsg = buildChatMessage(userInfo, kind, content, msgType, param, now);
-
-    // Store in room history
-    storeMessage(roomId, chatMsg);
-
-    // Broadcast to all room members
-    broadcastToRoom(roomId, chatMsg, io);
-
-    logger.info('CHAT', 'sendMsg: userId=' + userId + ', kind=' + kind + ', roomId=' + roomId +
-        ', content=' + (content.length > 30 ? content.substring(0, 30) + '...' : content));
-
-    // Return server timestamp to sender
-    callback(RH.success({ _time: now }));
-}
-
-/**
- * getRecord — Fetch message history for a room.
- *
- * CLIENT CODE (line 58328-58341):
- *   ts.processHandlerWithChat({
- *       type: "chat",
- *       action: "getRecord",
- *       userId: o,
- *       roomId: n,
- *       startTime: t.teamDungeonInfoStartTime,
- *       version: "1.0"
- *   }, function(t) { t._record = [...] })
- *
- * @param {object} socket
- * @param {object} parsed - { userId, roomId, startTime }
- * @param {function} callback
- */
-function handleGetRecord(socket, parsed, callback) {
-    var userId = parsed.userId;
-    var roomId = parsed.roomId;
-    var startTime = parsed.startTime || 0;
-
-    if (!roomId) {
-        return callback(RH.error(RH.ErrorCode.LACK_PARAM, 'Missing roomId'));
-    }
-
-    logger.info('CHAT', 'getRecord: userId=' + userId + ', roomId=' + roomId + ', startTime=' + startTime);
-
-    // Get messages from room history, optionally filtered by startTime
-    var allMessages = roomMessages[roomId] || [];
-    var filtered = allMessages;
-
-    if (startTime > 0) {
-        filtered = allMessages.filter(function (msg) {
-            return msg._time >= startTime;
-        });
-    }
-
-    callback(RH.success({ _record: filtered }));
-}
-
-// =============================================
-// 7. CREATE HTTP SERVER & Socket.IO
-// =============================================
-
-var server = http.createServer(function (req, res) {
+var server = http.createServer(function(req, res) {
     if (req.method === 'GET' && req.url === '/health') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
@@ -608,8 +113,10 @@ var server = http.createServer(function (req, res) {
             server: 'chat',
             port: SERVER_PORT,
             uptime: process.uptime(),
-            connectedUsers: Object.keys(connectedUsers).length,
-            activeRooms: Object.keys(rooms).length,
+            connectedUsers: userManager.getStats().connectedUsers,
+            activeRooms: roomManager.getActiveRoomCount(),
+            messagesStored: messageStore.getStats().totalMessages,
+            rateLimitedUsers: rateLimiter.trackedCount(),
             totalConnections: totalConnections,
             activeConnections: activeConnections,
             timestamp: new Date().toISOString(),
@@ -621,6 +128,10 @@ var server = http.createServer(function (req, res) {
     res.end(JSON.stringify({ error: 'Not found' }));
 });
 
+// =============================================
+// 7. SOCKET.IO SETUP
+// =============================================
+
 var io = require('socket.io')(server, {
     serveClient: false,
     pingInterval: 10000,
@@ -629,11 +140,14 @@ var io = require('socket.io')(server, {
     transports: ['websocket', 'polling'],
 });
 
+// Inject io into deps (needed by sendMsg broadcast)
+deps.io = io;
+
 // =============================================
 // 8. CONNECTION HANDLING
 // =============================================
 
-io.on('connection', function (socket) {
+io.on('connection', function(socket) {
     totalConnections++;
     activeConnections++;
 
@@ -644,85 +158,18 @@ io.on('connection', function (socket) {
     logger.info('CHAT', 'Client connected: ' + socket.id + ' (IP: ' + clientIp + ')');
 
     // Initialize socket state
-    socket._verified = false;
     socket._userId = null;
     socket._userInfo = null;
-    socket._verifyAttempts = 0;
 
-    // =============================================
-    // 8.1 TEA VERIFICATION (same as main-server)
-    // =============================================
+    // ---- TEA Verification ----
+    var authHandle = chatAuth.setupVerification(socket, TEA_KEY);
 
-    var challenge = TEA.generateChallenge();
-    socket._challenge = challenge;
+    // ---- Main Request Handler ----
+    socket.on('handler.process', function(request, callback) {
+        // Verify check
+        if (!chatAuth.requireVerified(socket, callback)) return;
 
-    logger.info('CHAT', 'Sending challenge to ' + socket.id);
-    socket.emit('verify', challenge);
-
-    var verifyTimer = setTimeout(function () {
-        if (!socket._verified && socket.connected) {
-            logger.warn('CHAT', 'Verify timeout for ' + socket.id + ' — disconnecting');
-            socket.emit('verifyFailed', 'Verification timeout');
-            socket.disconnect(true);
-        }
-    }, VERIFY_TIMEOUT);
-
-    socket.on('verify', function (encryptedResponse, callback) {
-        socket._verifyAttempts++;
-
-        function sendVerifyResult(code) {
-            if (typeof callback === 'function') {
-                callback({ ret: code, compress: false, serverTime: Date.now(), server0Time: Date.now() });
-            }
-        }
-
-        if (socket._verified) {
-            sendVerifyResult(0);
-            return;
-        }
-
-        if (!encryptedResponse) {
-            if (socket._verifyAttempts >= VERIFY_MAX_ATTEMPTS) {
-                clearTimeout(verifyTimer);
-                sendVerifyResult(38);
-                socket.disconnect(true);
-            } else {
-                sendVerifyResult(4);
-            }
-            return;
-        }
-
-        var isValid = TEA.verifyChallenge(challenge, encryptedResponse, TEA_KEY);
-
-        if (isValid) {
-            socket._verified = true;
-            clearTimeout(verifyTimer);
-            logger.info('CHAT', 'Verified: ' + socket.id + ' (attempt ' + socket._verifyAttempts + ')');
-            sendVerifyResult(0);
-        } else {
-            logger.warn('CHAT', 'Invalid verify from ' + socket.id +
-                ' (attempt ' + socket._verifyAttempts + '/' + VERIFY_MAX_ATTEMPTS + ')');
-
-            if (socket._verifyAttempts >= VERIFY_MAX_ATTEMPTS) {
-                clearTimeout(verifyTimer);
-                sendVerifyResult(38);
-                socket.disconnect(true);
-            } else {
-                sendVerifyResult(38);
-            }
-        }
-    });
-
-    // =============================================
-    // 8.2 MAIN REQUEST HANDLER — "handler.process"
-    // =============================================
-
-    socket.on('handler.process', function (request, callback) {
-        if (!socket._verified) {
-            RH.sendResponse(socket, 'handler.process', RH.error(6, 'Not verified'), callback);
-            return;
-        }
-
+        // Validate request
         if (!request) {
             RH.sendResponse(socket, 'handler.process', RH.error(2, 'Empty request'), callback);
             return;
@@ -750,23 +197,23 @@ io.on('connection', function (socket) {
         try {
             switch (action) {
                 case 'login':
-                    handleChatLogin(socket, parsed, callback);
+                    handleLogin(deps, socket, parsed, callback);
                     break;
 
                 case 'joinRoom':
-                    handleJoinRoom(socket, parsed, callback);
+                    handleJoinRoom(deps, socket, parsed, callback);
                     break;
 
                 case 'leaveRoom':
-                    handleLeaveRoom(socket, parsed, callback);
+                    handleLeaveRoom(deps, socket, parsed, callback);
                     break;
 
                 case 'sendMsg':
-                    handleSendMsg(socket, parsed, callback);
+                    handleSendMsg(deps, socket, parsed, callback);
                     break;
 
                 case 'getRecord':
-                    handleGetRecord(socket, parsed, callback);
+                    handleGetRecord(deps, socket, parsed, callback);
                     break;
 
                 default:
@@ -781,100 +228,102 @@ io.on('connection', function (socket) {
         }
     });
 
-    // =============================================
-    // 8.3 DISCONNECT HANDLER
-    // =============================================
-
-    socket.on('disconnect', function (reason) {
+    // ---- Disconnect Handler ----
+    socket.on('disconnect', function(reason) {
         activeConnections--;
-        clearTimeout(verifyTimer);
+        authHandle.destroy();
 
         // Leave all rooms
-        leaveAllRooms(socket.id);
+        var roomsLeft = roomManager.leaveAll(socket.id);
 
         // Clean up user tracking
-        var userId = socket._userId;
-        if (userId) {
+        var result = userManager.logout(socket.id);
+        if (result.userId) {
             // NOTE: Do NOT send system message on disconnect.
-            // Client BroadcastSingleton.setChatValue() accesses noticeContent[_type]
-            // for system messages (_kind==1), and if _type doesn't exist in
-            // noticeContent, it crashes: "s[r] is undefined".
-            // The original server never sent system messages on leave either.
-            // Just clean up silently.
-
-            // Remove from connected users (only if this socket)
-            if (connectedUsers[userId] && connectedUsers[userId].socket === socket) {
-                delete connectedUsers[userId];
-            }
+            // Client crashes if system message _type not in noticeContent.json.
+            // Original server never sent system messages on leave.
+            logger.info('CHAT', 'Disconnected: userId=' + result.userId +
+                ', roomsLeft=' + roomsLeft);
         }
 
-        delete socketUsers[socket.id];
-
-        logger.info('CHAT', 'Disconnected: ' + socket.id + ' (Reason: ' + reason +
+        logger.info('CHAT', 'Disconnected: ' + socket.id +
+            ' (Reason: ' + reason +
             ', Verified: ' + (socket._verified ? 'yes' : 'no') +
             ', Active: ' + activeConnections + ')');
     });
 
-    // =============================================
-    // 8.4 ERROR HANDLER
-    // =============================================
-
-    socket.on('error', function (err) {
+    // ---- Error Handler ----
+    socket.on('error', function(err) {
         logger.error('CHAT', 'Socket error (' + socket.id + '): ' + err.message);
     });
 });
 
 // =============================================
-// 9. GRACEFUL SHUTDOWN
+// 9. PERIODIC CLEANUP
+// =============================================
+
+// Clean up expired rate limiter entries every 5 minutes
+var cleanupInterval = setInterval(function() {
+    var cleaned = rateLimiter.cleanup();
+    if (cleaned > 0) {
+        logger.info('CHAT', 'Cleanup: removed ' + cleaned + ' expired rate limit entries');
+    }
+}, 5 * 60 * 1000);
+
+// =============================================
+// 10. GRACEFUL SHUTDOWN
 // =============================================
 
 function gracefulShutdown(signal) {
     logger.info('CHAT', 'Received ' + signal + '. Shutting down...');
 
-    var keys = Object.keys(connectedUsers);
-    for (var i = 0; i < keys.length; i++) {
+    clearInterval(cleanupInterval);
+
+    // Disconnect all clients
+    var userIds = userManager.getConnectedUserIds();
+    for (var i = 0; i < userIds.length; i++) {
         try {
-            connectedUsers[keys[i]].socket.disconnect(true);
+            var sock = userManager.getSocketByUserId(userIds[i]);
+            if (sock) sock.disconnect(true);
         } catch (e) {
             // Ignore
         }
     }
-    logger.info('CHAT', 'Disconnected ' + keys.length + ' client(s)');
+    logger.info('CHAT', 'Disconnected ' + userIds.length + ' client(s)');
 
-    io.close(function () {
+    io.close(function() {
         logger.info('CHAT', 'Socket.IO closed');
 
         DB.closePool()
-            .then(function () {
+            .then(function() {
                 logger.info('CHAT', 'Database pool closed');
-                server.close(function () {
+                server.close(function() {
                     logger.info('CHAT', 'Server closed');
                     process.exit(0);
                 });
             })
-            .catch(function (err) {
+            .catch(function(err) {
                 logger.error('CHAT', 'Error closing DB: ' + err.message);
-                server.close(function () {
+                server.close(function() {
                     process.exit(0);
                 });
             });
     });
 
-    setTimeout(function () {
+    setTimeout(function() {
         logger.error('CHAT', 'Forced exit after timeout');
         process.exit(1);
     }, 10000);
 }
 
-process.on('SIGTERM', function () { gracefulShutdown('SIGTERM'); });
-process.on('SIGINT', function () { gracefulShutdown('SIGINT'); });
+process.on('SIGTERM', function() { gracefulShutdown('SIGTERM'); });
+process.on('SIGINT', function() { gracefulShutdown('SIGINT'); });
 
 // =============================================
-// 10. START SERVER
+// 11. START SERVER
 // =============================================
 
 async function startServer() {
-    // Initialize database
     logger.info('CHAT', 'Initializing database...');
     try {
         await DB.initPool();
@@ -885,16 +334,21 @@ async function startServer() {
         process.exit(1);
     }
 
-    // Start HTTP server
-    server.listen(SERVER_PORT, SERVER_HOST, function () {
+    server.listen(SERVER_PORT, SERVER_HOST, function() {
         console.log('');
         console.log('================================================');
-        console.log('  Chat Server is RUNNING!');
+        console.log('  Super Warrior Z — Chat Server');
         console.log('================================================');
         console.log('  Address:     http://' + SERVER_HOST + ':' + SERVER_PORT);
         console.log('  Socket.IO:   http://' + SERVER_HOST + ':' + SERVER_PORT);
         console.log('  Health:      http://' + SERVER_HOST + ':' + SERVER_PORT + '/health');
         console.log('  TEA Key:     ' + TEA_KEY);
+        console.log('================================================');
+        console.log('  Modules:');
+        console.log('    handlers/      → login, joinRoom, leaveRoom, sendMsg, getRecord');
+        console.log('    services/      → roomManager, messageStore, userManager');
+        console.log('    middleware/    → chatAuth (TEA verify)');
+        console.log('    utils/         → chatConstants, messageBuilder, rateLimiter');
         console.log('================================================');
         console.log('  Actions:');
         console.log('    handler.process → type=chat, action=login');
@@ -908,6 +362,10 @@ async function startServer() {
         console.log('  Status:');
         console.log('    Database:      ' + (DB.isReady() ? 'CONNECTED' : 'NOT CONNECTED'));
         console.log('    TEA Security:  ENABLED');
+        console.log('    Rate Limiter:  ENABLED (' +
+            chatConstants.LIMITS.RATE_LIMIT_MESSAGES + ' msgs/' +
+            chatConstants.LIMITS.RATE_LIMIT_WINDOW + 's)');
+        console.log('    Message Limit: ' + chatConstants.LIMITS.MAX_MESSAGES_PER_ROOM + '/room');
         console.log('================================================');
         console.log('');
         console.log('  Waiting for client connections...');
@@ -915,7 +373,7 @@ async function startServer() {
     });
 }
 
-server.on('error', function (err) {
+server.on('error', function(err) {
     if (err.code === 'EADDRINUSE') {
         logger.error('CHAT', 'FATAL: Port ' + SERVER_PORT + ' is already in use!');
     } else {
