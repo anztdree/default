@@ -219,4 +219,24 @@ async function start() {
     }
 }
 
+// ============================================
+// Graceful Shutdown
+// ============================================
+function gracefulShutdown(signal) {
+    info('LoginServer', `${signal} received — shutting down gracefully...`);
+    io.close();
+    server.close(() => {
+        info('LoginServer', 'HTTP server closed');
+        process.exit(0);
+    });
+    // Force exit after 5s if connections don't close
+    setTimeout(() => {
+        warn('LoginServer', 'Forced shutdown after timeout');
+        process.exit(1);
+    }, 5000);
+}
+
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+
 start();
