@@ -5,12 +5,13 @@
  *
  *  Mengexport semua middleware modules sebagai satu bundle.
  *  Handler modules cukup require('./middleware') untuk
- *  mengakses semua middleware.
+ *  mengakses semua middleware dan service dependencies.
  *
  *  Penggunaan:
  *    var middleware = require('./middleware');
  *    middleware.teaAuth.verifySocket(socket, next);
  *    middleware.requestValidator.validate(parsed);
+ *    middleware.notifications.sendNotify(socket, 'kickout', {});
  * =====================================================
  */
 

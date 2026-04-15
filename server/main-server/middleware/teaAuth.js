@@ -109,9 +109,9 @@ var TeaAuth = {
             }
         } else {
             console.error('[TeaAuth] requireAuth called with non-function handler');
-                if (typeof callback === 'function') {
-                    var errorResponse = ResponseHelper.error(ERROR_UNKNOWN,
-                        'Invalid handler configuration');
+            if (typeof callback === 'function') {
+                var errorResponse = ResponseHelper.error(ERROR_UNKNOWN,
+                    'Invalid handler configuration');
                 callback(errorResponse);
             }
         }
