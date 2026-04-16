@@ -64,6 +64,7 @@ var GameData = require('../../shared/gameData/loader');
 var logger = require('../../shared/utils/logger');
 var UserDataService = require('../services/userDataService');
 var configModule = require('../../shared/config');
+var chatConstants = require('../../chat-server/utils/chatConstants');
 
 // =============================================
 // ACTION HANDLERS
@@ -245,38 +246,80 @@ async function enterGame(socket, parsed, callback) {
 /**
  * registChat — Register chat room after entering game.
  *
- * Called every 3 seconds until successful (line 77397-77399).
- * Returns chat server connection info.
+ * Called every 3 seconds until successful (line 77364-77366).
+ * Returns chat server connection info and room IDs.
  *
- * CLIENT CODE (line 77392-77397):
- *   socket.emit("handler.process", {
+ * CLIENT CODE (line 77390-77399):
+ *   ts.processHandler({
  *       type: "user", action: "registChat",
  *       userId: UserInfoSingleton.getInstance().userId, version: "1.0"
  *   }, function(n) {
- *       if (n._success) { ... connect chatClient ... }
+ *       if (n._success) {
+ *           ts.loginInfo.serverItem.chaturl = n._chatServerUrl
+ *           ts.loginInfo.serverItem.worldRoomId = n._worldRoomId
+ *           ts.loginInfo.serverItem.guildRoomId = n._guildRoomId
+ *           ts.loginInfo.serverItem.teamDungeonChatRoom = n._teamDungeonChatRoom
+ *           ts.loginInfo.serverItem.teamChatRoomId = n._teamChatRoom
+ *           clearInterval(ts.chatInterval)
+ *           t.clientStartChat(false, e)  // connect chatClient
+ *       } else {
+ *           ts.chatConnectCount++
+ *           ts.chatConnectCount > 15 && clearInterval(ts.chatInterval)
+ *       }
  *   })
  *
+ * CLIENT FLOW AFTER SUCCESS (line 77400-77489):
+ *   1. clientStartChat → chatClient.connectToServer(chaturl)
+ *   2. On connect → chatLoginRequest(false, joinRecord)
+ *   3. chatLoginRequest joins rooms via Promise.all:
+ *      - worldRoomId         → ALWAYS joined (server-wide)
+ *      - guildRoomId         → joined only if truthy (player-specific)
+ *      - teamDungeonChatRoom → joined only if truthy (server-wide)
+ *      - teamChatRoom        → joined only if truthy (player-specific)
+ *
+ * ROOM ID SCHEME:
+ *   Defined in chat-server/utils/chatConstants.js:
+ *     getRoomId(roomType, serverId) = serverId * 100 + roomType
+ *   Room types: WORLD=1, GUILD=2, TEAM_DUNGEON=3, TEAM=4
+ *   For serverId=1: 101, 102, 103, 104
+ *
+ * GUILD & TEAM ROOM IDs:
+ *   These are player-specific (each guild/team has its own room).
+ *   At registChat time, player hasn't loaded guild/team data yet.
+ *   They are set later by guild/team handler responses:
+ *     - guildRoomId: line 77178 → ts.loginInfo.serverItem.guildRoomId = e._chatRoomId
+ *     - teamChatRoomId: line 87496 → ts.loginInfo.serverItem.teamChatRoomId = o
+ *   Returning null here is correct — client checks truthiness before joining.
+ *
  * @param {object} socket
- * @param {object} parsed
+ * @param {object} parsed - { type, action, userId, version }
  * @param {function} callback
  */
 async function registChat(socket, parsed, callback) {
     var userId = parsed.userId;
 
+    if (!userId) {
+        logger.warn('USER', 'registChat: missing userId');
+        return callback(RH.error(RH.ErrorCode.LACK_PARAM, 'Missing userId'));
+    }
+
     logger.info('USER', 'registChat: userId=' + userId);
 
-    // Chat server URL from config
-    var chatServerUrl = 'http://127.0.0.1:' + configModule.config.ports.chat;
+    // Chat server URL — use serverPublicHost (same pattern as getServerList/buildServerUrl)
+    var config = configModule.config;
+    var chatServerUrl = 'http://' + config.serverPublicHost + ':' + config.ports.chat;
 
-    // Return chat registration info
-    // Client reads: n._success, n._chatServerUrl, n._worldRoomId, n._guildRoomId, etc.
+    // Room IDs — use chatConstants.getRoomId() for consistency with chat-server
+    // Default serverId=1: WORLD=101, GUILD=102, TEAM_DUNGEON=103, TEAM=104
+    // Only worldRoomId and teamDungeonChatRoom are server-wide (always joined).
+    // guildRoomId and teamChatRoom are player-specific (set later by guild/team handlers).
     callback(RH.success({
         _success: true,
         _chatServerUrl: chatServerUrl,
-        _worldRoomId: 1,
-        _guildRoomId: 2,
-        _teamDungeonChatRoom: 3,
-        _teamChatRoom: 4,
+        _worldRoomId: chatConstants.getRoomId(chatConstants.ROOM_TYPE.WORLD),
+        _guildRoomId: null,
+        _teamDungeonChatRoom: chatConstants.getRoomId(chatConstants.ROOM_TYPE.TEAM_DUNGEON),
+        _teamChatRoom: null,
     }));
 }
 
@@ -393,36 +436,91 @@ async function changeHeadBox(socket, parsed, callback) {
 /**
  * clickSystem — Record a system UI click event / daily reward claim tracking.
  *
+ * Called when user clicks certain system panels (Temple Trial privilege,
+ * Chapter fund privilege) to mark them as "seen" and persist to user_data.
+ *
+ * CLIENT CODE (line 148728, 159924):
+ *   ts.processHandler({
+ *       type: "user", action: "clickSystem",
+ *       sysType: CLICK_SYSTEM.TEMPLE_FUND,   // or CLICK_SYSTEM.LESSON_FUND
+ *       userId: e
+ *   }, function(e) {
+ *       UserClickSingleton.getInstance().setClickSys(CLICK_SYSTEM.TEMPLE_FUND, !0)
+ *   })
+ *
+ * CALLBACK BEHAVIOR:
+ *   Client does NOT read the response body. It only hardcodes
+ *   setClickSys(type, true) locally. So response format is irrelevant
+ *   to the client — but server should still persist the state.
+ *
+ * CLICK_SYSTEM enum:
+ *   LESSON_FUND = 1  (Chapter fund privilege)
+ *   TEMPLE_FUND = 2  (Temple Trial fund privilege)
+ *
+ * USER DATA STRUCTURE:
+ *   clickSystem: { _clickSys: { "1": false, "2": false } }
+ *   Loaded on login (line 77645-77646), iterated with for...in.
+ *
  * @param {object} socket
- * @param {object} parsed - { userId, systemId }
+ * @param {object} parsed - { type, action, userId, sysType, version }
  * @param {function} callback
  */
 async function clickSystem(socket, parsed, callback) {
     var userId = parsed.userId;
-    var systemId = parsed.systemId;
+    var sysType = parsed.sysType;
 
-    logger.info('USER', 'clickSystem: userId=' + userId + ', systemId=' + systemId);
+    logger.info('USER', 'clickSystem: userId=' + userId + ', sysType=' + sysType);
 
-    callback(RH.success({
-        _changeInfo: {
-            _clickSystem: {},
-            _items: {},
-        },
-    }));
+    callback(RH.success({}));
 }
 
 /**
  * getBulletinBrief — Get summary/list of bulletin/announcement headers.
  *
+ * Called on login (UserDataParser.saveUserData line 77645, fire-and-forget)
+ * and when user opens Notice Board tab (5-minute throttle).
+ *
+ * CLIENT CODE (line 79579):
+ *   ts.processHandler({
+ *       type: "user", action: "getBulletinBrief",
+ *       userId: n, version: "1.0"
+ *   }, function(n) {
+ *       t.bulletinList = {};
+ *       for (var o in n._brief)
+ *           t.bulletinList[o] = {
+ *               bulletin: "",
+ *               bulletinTitle: n._brief[o].title,
+ *               bulletinVersion: n._brief[o].version,
+ *               order: n._brief[o].order
+ *           };
+ *       e && e()
+ *   })
+ *
+ * RESPONSE FORMAT:
+ *   { _brief: { <id>: { title: string, version: string, order: number }, ... } }
+ *   _brief is an OBJECT keyed by bulletin ID, NOT an array.
+ *   Client iterates with for...in, reads .title, .version, .order.
+ *   Empty object {} = no bulletins = Notice Board shows nothing.
+ *
+ * RED DOT LOGIC (getBulletinRed):
+ *   Compares local bulletinVersions (persisted per-user) against each
+ *   bulletin's version. Mismatch → show red dot on Notice Board tab.
+ *
  * @param {object} socket
- * @param {object} parsed
+ * @param {object} parsed - { type, action, userId, version }
  * @param {function} callback
  */
 async function getBulletinBrief(socket, parsed, callback) {
-    logger.info('USER', 'getBulletinBrief: userId=' + (parsed.userId || '-'));
+    var userId = parsed.userId;
 
+    logger.info('USER', 'getBulletinBrief: userId=' + (userId || '-'));
+
+    // Return bulletin brief list.
+    // _brief = object keyed by bulletin ID, each with title/version/order.
+    // Empty object {} = no bulletins (local game, no admin panel to create).
+    // Client iterates with for...in → no iterations → bulletinList = {}.
     callback(RH.success({
-        _bulletinBriefList: [],
+        _brief: {},
     }));
 }
 
@@ -444,22 +542,39 @@ async function queryPlayerHeadIcon(socket, parsed, callback) {
 /**
  * readBulletin — Read full content of a specific bulletin.
  *
+ * Called when user expands a bulletin item in the Notice Board that
+ * hasn't been loaded yet, or clicks a bulletin with the "new" badge.
+ *
+ * CLIENT CODE (line 129477):
+ *   ts.processHandler({
+ *       type: "user", action: "readBulletin",
+ *       userId: i, id: a, version: "1.0"
+ *   }, function(t) {
+ *       e.data.noticeInfo = MailInfoManager.getInstance().saveBulletin(a, t);
+ *       ts.currentSceneNode;
+ *       ts.refreshNodeRed(), n()
+ *   })
+ *
+ * RESPONSE FORMAT (read by saveBulletin):
+ *   { _bulletin: string, _bulletinTitle: string, _bulletinVersion: string }
+ *   All 3 fields are read FLAT from the response — NOT wrapped in an object.
+ *   saveBulletin sets bulletinVersions[id] = response._bulletinVersion
+ *   and updates bulletinList[id] with the content.
+ *
  * @param {object} socket
- * @param {object} parsed - { bulletinId }
+ * @param {object} parsed - { type, action, userId, id, version }
+ *                          Note: client sends `id`, NOT `bulletinId`
  * @param {function} callback
  */
 async function readBulletin(socket, parsed, callback) {
-    var bulletinId = parsed.bulletinId;
+    var bulletinId = parsed.id;
 
-    logger.info('USER', 'readBulletin: bulletinId=' + bulletinId);
+    logger.info('USER', 'readBulletin: bulletinId=' + (bulletinId || '-'));
 
     callback(RH.success({
-        _bulletinDetail: {
-            _bulletinId: bulletinId,
-            _title: '',
-            _content: '',
-            _publishTime: 0,
-        },
+        _bulletin: '',
+        _bulletinTitle: '',
+        _bulletinVersion: '',
     }));
 }
 
