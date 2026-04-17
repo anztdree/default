@@ -1049,17 +1049,29 @@ function getQigongQualityMaxParaForQuality(qualityName) {
  * Get zPower quality para multiplier.
  * zPowerQualityPara.json: keys "1"-"7", each has quality and para.
  *
+ * IMPORTANT: The raw para values from the default JSON produce extremely low
+ * zPower (e.g. purple level 3 = 34 instead of ~1500). The original server
+ * applied a runtime scaling multiplier so the formula produces correct power
+ * values matching the client's getHeroZpowe() output.
+ *
+ * Scale factor derived from: Kid Goku purple level 3 should give ~1500 power.
+ *   inner = 100 + 3 * 5^(1 + ceil(3/10)/35) ≈ 115.7
+ *   1500 / (115.7 * 0.3) ≈ 43.26
+ *
  * @param {number} qualityIndex - Quality tier index (1-7)
  * @returns {number} Para multiplier (default 1)
  */
+var ZPOWER_PARA_SCALE = 43.33;
+
 function getZPowerQualityPara(qualityIndex) {
     var config = GameData.get('zPowerQualityPara');
-    if (!config) return 1;
+    if (!config) return ZPOWER_PARA_SCALE;
 
     var entry = config[String(qualityIndex)];
-    if (!entry) return 1;
+    if (!entry) return ZPOWER_PARA_SCALE;
 
-    return entry.para || 1;
+    var rawPara = entry.para || 1;
+    return rawPara * ZPOWER_PARA_SCALE;
 }
 
 /**
@@ -1246,8 +1258,15 @@ function collectPassiveAttrs(heroInfo, evolveLevel, heroData) {
         if (!potId) continue;
 
         // Get current level from heroData
-        var potLevelKey = '_potential' + pi + 'Level';
-        var potLevel = (heroData && heroData[potLevelKey] != null) ? heroData[potLevelKey] : 1;
+        // [FIX] _potentialLevel is a dict { "1": level, "2": level, "3": level }
+        // NOT separate fields like _potential1Level. Look up by slot key.
+        var potLevel = 1;
+        if (heroData && heroData._potentialLevel) {
+            var potKey = String(pi);
+            if (heroData._potentialLevel[potKey] != null) {
+                potLevel = heroData._potentialLevel[potKey];
+            }
+        }
 
         var potAttrs = getPotentialSkillAttr(potId, potLevel);
         var potKeys = Object.keys(potAttrs);
@@ -1525,13 +1544,15 @@ function calculateHeroAttrs(heroData, gameData) {
     // === STEP 10: Calculate total attributes ===
     // hp and attack are multiplied by talent in _totalAttr
     // Armor is NOT multiplied by talent
-    var totalHP_base = Math.floor(baseHP * (levelUpMul.hpMul || 1)) * totalTalent;
+    // [FIX] Floor must be applied AFTER talent multiplication, not before.
+    // Formula: floor(base * mul * talent), NOT floor(base * mul) * talent
+    var totalHP_base = Math.floor(baseHP * (levelUpMul.hpMul || 1) * totalTalent);
     var totalHP = Math.floor(totalHP_base * (1 + passiveHpPercent / 100))
                 + evolveHP + wakeupHP
                 + qigongHP + qigongTmpHP
                 + (breakAttrs.hp || 0) + passiveHP;
 
-    var totalAttack_base = Math.floor(baseAttack * (levelUpMul.attackMul || 1)) * totalTalent;
+    var totalAttack_base = Math.floor(baseAttack * (levelUpMul.attackMul || 1) * totalTalent);
     var totalAttack = Math.floor(totalAttack_base * (1 + passiveAttackPercent / 100))
                     + evolveAttack + wakeupAttack
                     + qigongAttack + qigongTmpAttack
@@ -1547,12 +1568,16 @@ function calculateHeroAttrs(heroData, gameData) {
     var totalSpeed = baseSpeed + wakeupSpeed + passiveSpeed;
 
     // === STEP 11: zPower calculation ===
+    // zPower uses BASE quality from hero.json (static), NOT evolveLevel-based qualityIndex.
+    // Client getHeroZpowe(quality, level) passes heroQuality string from hero.json config.
+    // At guide start evolveLevel=0 → qualityIndex=1 (white), but Kid Goku base quality=purple.
+    // Using evolveLevel-based qualityIndex gives wrong para multiplier.
     var zPower = 0;
     var zpA = getConstant('zPowerFormulaParaA') || 100;
     var zpB = getConstant('zPowerFormulaParaB') || 5;
     var zpC = getConstant('zPowerFormulaParaC') || 10;
     var zpD = getConstant('zPowerFormulaParaD') || 35;
-    var zpQualityPara = getZPowerQualityPara(qualityIndex);
+    var zpQualityPara = getZPowerQualityPara(QUALITY_INDEX[baseQuality] || 1);
     zPower = (zpA + level * Math.pow(zpB, 1 + Math.ceil(level / zpC) / zpD)) * zpQualityPara;
     zPower = Math.floor(zPower);
 
@@ -1876,7 +1901,7 @@ function addHero(gameData, heroId, heroDisplayId, level) {
         _heroBaseAttr: {
             _level: defaultLevel,
             _evolveLevel: 0,
-            maxlevel: getMaxLevel(0),
+            maxlevel: getConstant('heroZeroStarMaxLevel') || 100,
             _hp: 0,
             _attack: 0,
             _armor: 0,
@@ -2272,7 +2297,7 @@ function getHeroUpType(heroData) {
     var level = heroData._heroBaseAttr._level || 1;
     var evolveLevel = heroData._heroBaseAttr._evolveLevel || 0;
     var star = heroData._heroStar || 0;
-    var maxLevel = getMaxLevel(evolveLevel, star);
+    var maxLevel = getMaxLevel(heroData);
 
     if (level >= maxLevel) {
         return { upType: UP_TYPE.TYPE_FULL, nextLevel: 0, maxLevel: maxLevel };
@@ -3538,7 +3563,7 @@ function actionSplitHero(parsed, callback) {
             }
 
             var displayId = heroData._heroDisplayId;
-            var quality = getHeroQuality(heroData);
+            var quality = getHeroBaseQuality(heroData._heroDisplayId);
 
             // Build linked heroes response BEFORE removing
             var heroLinks = buildLinkHeroesResponse(gameData, hid, heroData);
@@ -3670,7 +3695,7 @@ function actionInherit(parsed, callback) {
         }
 
         // Source hero quality check (must be >= flickerOrange)
-        var fromQuality = getHeroQuality(fromHero);
+        var fromQuality = getHeroBaseQuality(fromHero._heroDisplayId);
         var fromQIdx = getQualityIndex(fromQuality);
         var flickerIdx = QUALITY_INDEX['flickerOrange'] || 6;
         if (fromQIdx < flickerIdx) {
@@ -3714,10 +3739,7 @@ function actionInherit(parsed, callback) {
         toHero._heroBaseAttr._level = fromHero._heroBaseAttr._level;
         toHero._heroBaseAttr._evolveLevel = fromHero._heroBaseAttr._evolveLevel;
         toHero._heroStar = fromHero._heroStar;
-        toHero._heroBaseAttr.maxlevel = getMaxLevel(
-            fromHero._heroBaseAttr._evolveLevel,
-            fromHero._heroStar
-        );
+        toHero._heroBaseAttr.maxlevel = getMaxLevel(toHero);
 
         // Remove source hero
         removeHero(gameData, fromHeroId);
@@ -4921,7 +4943,7 @@ function actionRebornSelfBreak(parsed, callback) {
             return;
         }
 
-        var quality = getHeroQuality(heroData);
+        var quality = getHeroBaseQuality(heroData._heroDisplayId);
         var changes = [];
         initTotalCost(heroData);
 
@@ -4974,10 +4996,11 @@ function actionRebornSelfBreak(parsed, callback) {
 
             for (var bl2 = 1; bl2 <= currentBreakLevel; bl2++) {
                 for (var tl = 1; tl <= selfBreakPointLevel; tl++) {
-                    var trainEntry = getSelfBreakEntry(breakType, bl2, tl);
+                    var breakType2 = heroInfo ? (heroInfo.breakType2 || '') : '';
+                    var trainEntry = getSelfBreakEntry(breakType, bl2, tl, breakType2);
                     if (trainEntry && trainEntry.costNum1 > 0 && trainEntry.costID1) {
                         var trainRefund = Math.floor(
-                            (trainEntry.costNum1 || 0) * (qualMul.costPara || 1) / 2
+                            (trainEntry.costNum1 || 0) * (qualMul.abilityPara || 1) / 2
                         );
                         if (trainRefund > 0) {
                             changes.push(addItem(gameData, trainEntry.costID1, trainRefund));
@@ -6385,7 +6408,7 @@ function validateEvolvePrerequisites(heroData) {
  * @returns {object} { canBreak: boolean, reason: string }
  */
 function validateBreakPrerequisites(heroData) {
-    var quality = getHeroQuality(heroData);
+    var quality = getHeroBaseQuality(heroData._heroDisplayId);
     var qIdx = getQualityIndex(quality);
 
     if (qIdx < (QUALITY_INDEX['purple'] || 4)) {
@@ -6422,7 +6445,7 @@ function migrateHeroData(heroData) {
     if (!heroData._heroBaseAttr) {
         heroData._heroBaseAttr = {
             _level: 1, _evolveLevel: 0,
-            maxlevel: getMaxLevel(0),
+            maxlevel: getConstant('heroZeroStarMaxLevel') || 100,
             _hp: 0, _attack: 0, _armor: 0, _speed: 0,
             _hit: 0, _dodge: 0, _block: 0, _blockEffect: 0,
             _skillDamage: 0, _critical: 0, _criticalResist: 0,
@@ -6480,10 +6503,7 @@ function migrateHeroData(heroData) {
 
     // Ensure maxlevel is set
     if (!heroData._heroBaseAttr.maxlevel) {
-        heroData._heroBaseAttr.maxlevel = getMaxLevel(
-            heroData._heroBaseAttr._evolveLevel || 0,
-            heroData._heroStar || 0
-        );
+        heroData._heroBaseAttr.maxlevel = getMaxLevel(heroData);
     }
 
     // Initialize totalCost if missing
