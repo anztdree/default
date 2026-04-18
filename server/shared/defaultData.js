@@ -702,6 +702,15 @@ function generateNewUserData(userId, nickName, serverId) {
 function mergeWithDefaults(loadedData, userId, nickName, serverId) {
     // Generate fresh defaults as the base
     const defaults = generateNewUserData(userId, nickName, serverId);
+    const HANGUP_DEFAULTS = {
+        _curLess: GAME_CONSTANTS.startLesson,
+        _maxPassLesson: GAME_CONSTANTS.startLesson,
+        _maxPassChapter: GAME_CONSTANTS.startChapter,
+        _haveGotChapterReward: {},
+        _clickGlobalWarBuffTag: '',
+        _buyFund: false,
+        _haveGotFundReward: {}
+    };
     
     if (!loadedData || typeof loadedData !== 'object') {
         return defaults;
@@ -711,6 +720,18 @@ function mergeWithDefaults(loadedData, userId, nickName, serverId) {
     for (const key of Object.keys(defaults)) {
         if (loadedData.hasOwnProperty(key) && loadedData[key] !== null && loadedData[key] !== undefined) {
             defaults[key] = loadedData[key];
+        }
+    }
+    
+    // DEEP MERGE hangup: ensure all default sub-fields exist
+    // even if loadedData.hangup is missing some of them.
+    // Without this, a DB row with hangup:{_curLess:10101} but missing
+    // _maxPassLesson would lose the default → client crash.
+    if (defaults.hangup && typeof defaults.hangup === 'object') {
+        for (const hk of Object.keys(HANGUP_DEFAULTS)) {
+            if (defaults.hangup[hk] === null || defaults.hangup[hk] === undefined) {
+                defaults.hangup[hk] = HANGUP_DEFAULTS[hk];
+            }
         }
     }
     
