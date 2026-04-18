@@ -1,15 +1,15 @@
 /**
  * Default Data Generator for New Users
- * 
+ *
  * 100% derived from client code analysis and resource/json config files.
- * 
+ *
  * Sources:
  * - resource/json/constant.json -> initial values
  * - resource/json/summonEnergy.json -> initial summon energy
  * - UserDataParser.saveUserData() (line 77643-77724) -> field structure
  * - HeroAttribute defaults (line 84951-84961) -> attribute structure
  * - Serializable base class (line 51891-51894) -> _prefix stripping
- * 
+ *
  * Every field in this file is derived from client code analysis.
  * The client reads these fields in UserDataParser.saveUserData(e)
  * where `e` is the parsed JSON from the enterGame response.
@@ -54,7 +54,7 @@ const ITEM_IDS = {
 
 /**
  * Generate default totalProps (inventory) for new user
- * 
+ *
  * Client: setBackpack(e) reads e.totalProps._items as {[itemId]: {_id, _num}}
  * From constant.json: startDiamond=0, startGold=0, startUserLevel=1
  */
@@ -82,7 +82,7 @@ function generateDefaultTotalProps() {
 
 /**
  * Generate default hero data for new user
- * 
+ *
  * Client: HerosManager.readByData(e.heros) reads e.heros._heros
  * From constant.json: startHero="1205", startHeroLevel="3"
  * From HeroAttribute (line 84951): 31 attributes, all default 0 except _level
@@ -134,10 +134,10 @@ function generateDefaultHero(userId) {
 
 /**
  * Generate complete enterGame response for a NEW user
- * 
+ *
  * 100% from UserDataParser.saveUserData() (line 77643-77724)
  * and constant.json initial values.
- * 
+ *
  * @param {string} userId
  * @param {string} nickName
  * @param {number} serverId
@@ -330,11 +330,21 @@ function generateNewUserData(userId, nickName, serverId) {
 
         // giftInfo (line 77647-77650): WelfareInfoManager
         // Reads e.giftInfo._fristRecharge, e.giftInfo._haveGotVipRewrd, etc.
+        //
+        // FIX: _onlineGift must be an OBJECT with _curId and _nextTime, NOT a number.
+        // Client WelfareInfoManager.setOnlineGift(e) reads e._curId and e._nextTime.
+        // If _onlineGift is 0 (number), then 0._curId → undefined → crash.
+        // Client Home.setOnLineGift() then calls getOnLineCurId() which returns undefined,
+        // and onlineBonus[undefined].nextID → TypeError: can't access property "nextID".
+        //
+        // Client OnlineGiftItem constructor (line 88097):
+        //   this._curId = 0;
+        //   this._nextTime = 0;
         giftInfo: {
             _fristRecharge: 0,
             _haveGotVipRewrd: 0,
             _buyVipGiftCount: 0,
-            _onlineGift: 0,
+            _onlineGift: { _curId: 0, _nextTime: 0 },   // FIX: was `_onlineGift: 0`
             _gotBSAddToHomeReward: 0,
             _clickHonghuUrlTime: 0,
         },
@@ -680,7 +690,7 @@ function generateNewUserData(userId, nickName, serverId) {
 
 /**
  * Merge loaded user data with defaults to prevent null crashes
- * 
+ *
  * PROBLEM: When loading existing user data from database, some fields
  * may be null/undefined from previous test runs or data corruption.
  * The client's UserDataParser.saveUserData() reads many fields UNCONDITIONALLY
@@ -688,11 +698,11 @@ function generateNewUserData(userId, nickName, serverId) {
  *   Object.keys(null) -> TypeError: can't convert null to object (setMainTask)
  *   e.currency._diamond -> TypeError: cannot read property '_diamond' of null
  *   e.hangup._curLess -> TypeError: cannot read property '_curLess' of null
- * 
+ *
  * FIELDS THAT MUST NOT BE NULL (client reads unconditionally):
  *   currency, user, hangup, summon, totalProps, heros, superSkill,
  *   scheduleInfo, dragonEquiped, clickSystem, curMainTask
- * 
+ *
  * @param {object|null} loadedData - Data loaded from database (may have nulls)
  * @param {string} userId - User ID for generating fresh defaults
  * @param {string} nickName - Nickname for defaults
@@ -711,18 +721,18 @@ function mergeWithDefaults(loadedData, userId, nickName, serverId) {
         _buyFund: false,
         _haveGotFundReward: {}
     };
-    
+
     if (!loadedData || typeof loadedData !== 'object') {
         return defaults;
     }
-    
+
     // For each key in defaults, use loaded value only if non-null
     for (const key of Object.keys(defaults)) {
         if (loadedData.hasOwnProperty(key) && loadedData[key] !== null && loadedData[key] !== undefined) {
             defaults[key] = loadedData[key];
         }
     }
-    
+
     // DEEP MERGE hangup: ensure all default sub-fields exist
     // even if loadedData.hangup is missing some of them.
     // Without this, a DB row with hangup:{_curLess:10101} but missing
@@ -734,7 +744,27 @@ function mergeWithDefaults(loadedData, userId, nickName, serverId) {
             }
         }
     }
-    
+
+    // FIX: Validate _onlineGift format
+    // Client expects { _curId: number, _nextTime: number }
+    // If loaded data has _onlineGift as a number (old format) or missing/wrong type, fix it.
+    if (defaults.giftInfo && typeof defaults.giftInfo === 'object') {
+        var og = defaults.giftInfo._onlineGift;
+        if (og === null || og === undefined || typeof og !== 'object') {
+            // Old/corrupt format: was 0 (number) or missing
+            var oldCurId = 0;
+            if (typeof og === 'number' && og > 0) {
+                // Preserve the old value as _curId if it was a valid number
+                oldCurId = og;
+            }
+            defaults.giftInfo._onlineGift = { _curId: oldCurId, _nextTime: 0 };
+        } else {
+            // It's an object — ensure it has the required fields
+            if (typeof og._curId !== 'number') og._curId = 0;
+            if (typeof og._nextTime !== 'number') og._nextTime = 0;
+        }
+    }
+
     // Also preserve any extra keys from loadedData that aren't in defaults
     // (future-proofing for new fields added in updates)
     for (const key of Object.keys(loadedData)) {
@@ -742,7 +772,7 @@ function mergeWithDefaults(loadedData, userId, nickName, serverId) {
             defaults[key] = loadedData[key];
         }
     }
-    
+
     return defaults;
 }
 
