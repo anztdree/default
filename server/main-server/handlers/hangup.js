@@ -191,6 +191,8 @@ function buildRightTeam(enemyList, enemyLevel) {
  */
 function buildBattleAwardItems(lessonConfig) {
     var items = {};
+    var expIncluded = false;
+    var levelIncluded = false;
 
     // Parse up to 5 award slots from lesson config
     for (var i = 1; i <= 5; i++) {
@@ -199,8 +201,18 @@ function buildBattleAwardItems(lessonConfig) {
         if (awardId && awardNum) {
             var idStr = String(awardId);
             items[idStr] = { _id: Number(awardId), _num: Number(awardNum) };
+            if (Number(awardId) === ITEM_IDS.PLAYEREXPERIENCEID) {
+                expIncluded = true;
+            }
+            if (Number(awardId) === ITEM_IDS.PLAYERLEVELID) {
+                levelIncluded = true;
+            }
         }
     }
+
+    // PlayerLevel (104): JANGAN pernah kirim di _changeInfo._items.
+    // Client handle level-up internally via expNeeded dari userUpgrade.json.
+    // Mengirim PlayerLevel=0 akan overwrite level yang benar jadi 0 → crash.
 
     return items;
 }
@@ -233,7 +245,8 @@ function calculateIdleRewards(lessonConfig, elapsedSeconds, vipLevel) {
     var effectiveSeconds = Math.min(elapsedSeconds, maxIdleSeconds);
 
     if (effectiveSeconds <= 0) {
-        // No idle rewards — return empty
+        // No idle rewards — return empty items.
+        // JANGAN kirim PlayerLevel=0 (akan crash client).
         return items;
     }
 
@@ -252,6 +265,9 @@ function calculateIdleRewards(lessonConfig, elapsedSeconds, vipLevel) {
             }
         }
     }
+
+    // PlayerLevel (104): JANGAN kirim di _changeInfo._items.
+    // Client handle level-up internally. PlayerLevel=0 crash.
 
     return items;
 }
@@ -378,16 +394,11 @@ async function handleStartGeneral(socket, parsed, callback) {
         logger.info('HANGUP', 'startGeneral: lessonId=' + curLess +
             ', enemies=' + enemyCount + ', battleId=' + battleId);
 
-        // Echo request params as real server does (client ignores them)
-        var startResponse = {
+        callback(RH.success({
             _battleId: battleId,
             _rightTeam: rightTeam,
             _rightSuper: []
-        };
-        if (parsed.team !== undefined) startResponse.team = parsed.team;
-        if (parsed.super !== undefined) startResponse.super = parsed.super;
-        if (parsed.battleField !== undefined) startResponse.battleField = parsed.battleField;
-        callback(RH.success(startResponse));
+        }));
 
     } catch (err) {
         logger.error('HANGUP', 'startGeneral error: ' + err.message + ', stack: ' + err.stack);
@@ -437,25 +448,15 @@ async function handleCheckBattleResult(socket, parsed, callback) {
 
         if (!won) {
             // LOSE — no progress, no rewards, no DB save
-            // Echo request params as real server does (client ignores them)
             logger.info('HANGUP', 'checkBattleResult: player lost, no progress for userId=' + userId);
 
-            var loseResponse = {
+            callback(RH.success({
                 _battleResult: 1,
                 _curLess: curLess,
                 _maxPassLesson: maxPassLesson,
                 _maxPassChapter: maxPassChapter,
                 _changeInfo: { _items: {} }
-            };
-            // Echo request params (normal battle only)
-            if (!isGuide) {
-                if (parsed.battleId !== undefined) loseResponse.battleId = parsed.battleId;
-                if (parsed.super !== undefined) loseResponse.super = parsed.super;
-                if (parsed.checkResult !== undefined) loseResponse.checkResult = parsed.checkResult;
-                if (parsed.battleField !== undefined) loseResponse.battleField = parsed.battleField;
-                if (parsed.runaway !== undefined) loseResponse.runaway = parsed.runaway;
-            }
-            callback(RH.success(loseResponse));
+            }));
             return;
         }
 
@@ -468,24 +469,12 @@ async function handleCheckBattleResult(socket, parsed, callback) {
 
         var lessonConfig = lessonConfigs[String(curLess)];
 
-        // Build battle award items from lesson config (these are DELTAS)
+        // Build battle award items from lesson config
         var awardItems = buildBattleAwardItems(lessonConfig);
 
         // Apply item deltas to totalProps
         if (gameData.totalProps && gameData.totalProps._items) {
             applyItemDeltas(gameData.totalProps._items, awardItems);
-        }
-
-        // Build response items with TOTAL values from totalProps
-        // Client expects _num = total amount, NOT delta
-        var responseItems = {};
-        if (gameData.totalProps && gameData.totalProps._items) {
-            for (var itemId in awardItems) {
-                var totalItem = gameData.totalProps._items[itemId];
-                if (totalItem) {
-                    responseItems[itemId] = { _id: totalItem._id, _num: totalItem._num };
-                }
-            }
         }
 
         // Update hangup state
@@ -494,8 +483,17 @@ async function handleCheckBattleResult(socket, parsed, callback) {
         var newMaxPassChapter = maxPassChapter;
 
         // Advance to next lesson if available
+        // SAFETY: Validate nextID exists in lesson.json before advancing
+        // Prevents TypeError: can't access property "nextID", t[n] is undefined
         if (lessonConfig.nextID) {
-            newCurLess = Number(lessonConfig.nextID);
+            var nextId = Number(lessonConfig.nextID);
+            if (nextId && lessonConfigs[String(nextId)]) {
+                newCurLess = nextId;
+            } else {
+                // nextID is invalid or doesn't exist in lesson.json — stay on current lesson
+                logger.warn('HANGUP', 'checkBattleResult: nextID=' + lessonConfig.nextID +
+                    ' is invalid or not found in lesson.json, staying on curLess=' + curLess);
+            }
         }
 
         // Update max pass chapter if entering a new chapter
@@ -520,22 +518,13 @@ async function handleCheckBattleResult(socket, parsed, callback) {
             ', maxPassChapter=' + newMaxPassChapter +
             ', isGuide=' + (isGuide ? 'true' : 'false'));
 
-        var winResponse = {
+        callback(RH.success({
             _battleResult: 0,
             _curLess: newCurLess,
             _maxPassLesson: newMaxPassLesson,
             _maxPassChapter: newMaxPassChapter,
-            _changeInfo: { _items: responseItems }
-        };
-        // Echo request params as real server does (normal battle only, not guide)
-        if (!isGuide) {
-            if (parsed.battleId !== undefined) winResponse.battleId = parsed.battleId;
-            if (parsed.super !== undefined) winResponse.super = parsed.super;
-            if (parsed.checkResult !== undefined) winResponse.checkResult = parsed.checkResult;
-            if (parsed.battleField !== undefined) winResponse.battleField = parsed.battleField;
-            if (parsed.runaway !== undefined) winResponse.runaway = parsed.runaway;
-        }
-        callback(RH.success(winResponse));
+            _changeInfo: { _items: awardItems }
+        }));
 
     } catch (err) {
         logger.error('HANGUP', 'checkBattleResult error: ' + err.message + ', stack: ' + err.stack);
@@ -722,23 +711,12 @@ async function handleGetChapterReward(socket, parsed, callback) {
 
         var chapterConfig = chapterConfigs[String(chapterId)];
 
-        // Build reward item deltas from chapter config
-        var rewardDeltas = buildChapterRewardItems(chapterConfig);
+        // Build reward items
+        var rewardItems = buildChapterRewardItems(chapterConfig);
 
         // Apply item deltas to totalProps
         if (gameData.totalProps && gameData.totalProps._items) {
-            applyItemDeltas(gameData.totalProps._items, rewardDeltas);
-        }
-
-        // Build response items with TOTAL values from totalProps
-        var chapterResponseItems = {};
-        if (gameData.totalProps && gameData.totalProps._items) {
-            for (var itemId in rewardDeltas) {
-                var totalItem = gameData.totalProps._items[itemId];
-                if (totalItem) {
-                    chapterResponseItems[itemId] = { _id: totalItem._id, _num: totalItem._num };
-                }
-            }
+            applyItemDeltas(gameData.totalProps._items, rewardItems);
         }
 
         // Mark chapter reward as claimed
@@ -751,18 +729,11 @@ async function handleGetChapterReward(socket, parsed, callback) {
         await userDataService.saveUserData(userId, gameData, 1);
 
         logger.info('HANGUP', 'getChapterReward: claimed chapter=' + chapterId +
-            ', rewardItems=' + Object.keys(chapterResponseItems).length);
+            ', rewardItems=' + Object.keys(rewardItems).length);
 
-        // Echo request params + universal response fields as real server does
         callback(RH.success({
-            chapterId: chapterId,
-            _addSigns: [],
-            _addWeapons: [],
-            _addHeroes: [],
-            _addGenkis: [],
-            _addStones: [],
             _changeInfo: {
-                _items: chapterResponseItems
+                _items: rewardItems
             }
         }));
 
@@ -838,27 +809,18 @@ async function handleGain(socket, parsed, callback) {
             lessonConfig = lessonConfigs[String(curLess)];
         }
 
-        // Calculate idle reward deltas
-        var idleDeltas = {};
+        // Calculate idle rewards
+        var idleItems = {};
         if (lessonConfig) {
-            idleDeltas = calculateIdleRewards(lessonConfig, elapsedSeconds, vipLevel);
+            idleItems = calculateIdleRewards(lessonConfig, elapsedSeconds, vipLevel);
+        } else {
+            // No lesson config — return empty items.
+            // JANGAN kirim PlayerLevel=0 (akan crash client).
         }
 
         // Apply item deltas to totalProps
         if (gameData.totalProps && gameData.totalProps._items) {
-            applyItemDeltas(gameData.totalProps._items, idleDeltas);
-        }
-
-        // Build response items with TOTAL values from totalProps
-        // Client expects _num = total amount, NOT delta
-        var gainResponseItems = {};
-        if (gameData.totalProps && gameData.totalProps._items) {
-            for (var itemId in idleDeltas) {
-                var totalItem = gameData.totalProps._items[itemId];
-                if (totalItem) {
-                    gainResponseItems[itemId] = { _id: totalItem._id, _num: totalItem._num };
-                }
-            }
+            applyItemDeltas(gameData.totalProps._items, idleItems);
         }
 
         // Update last gain time
@@ -867,7 +829,7 @@ async function handleGain(socket, parsed, callback) {
         // Save to DB
         await userDataService.saveUserData(userId, gameData, 1);
 
-        var rewardCount = Object.keys(idleDeltas).length;
+        var rewardCount = Object.keys(idleItems).length;
         logger.info('HANGUP', 'gain: userId=' + userId +
             ', elapsed=' + elapsedSeconds + 's' +
             ', vipLevel=' + vipLevel +
@@ -876,7 +838,7 @@ async function handleGain(socket, parsed, callback) {
 
         callback(RH.success({
             _changeInfo: {
-                _items: gainResponseItems
+                _items: idleItems
             },
             _lastGainTime: now,
             _exCount: 0,
