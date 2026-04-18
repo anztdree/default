@@ -2,17 +2,17 @@
 
 /**
  * =====================================================
- *  activity/shop/shopBuy.js
+ *  activity/shop/beStrongRefreshDiscount.js
  *  Super Warrior Z Game Server — Main Server
  *
- *  ACTION: shopBuy
- *  DESC: Buy item from activity shop
+ *  ACTION: beStrongRefreshDiscount
+ *  DESC: Refresh discount listings in be-strong event
  *  TYPE: WRITE
  *
  *  CLIENT REQUEST:
- *    { type:"activity", action:"shopBuy", actId, userId, itemId, num }
+ *    { type:"activity", action:"beStrongRefreshDiscount", actId, userId, day }
  *
- *  CLIENT SOURCE: ActivitySetReward.ShopBuyReward() (line ~79577)
+ *  CLIENT SOURCE: refreshItemBtnTap() (line 98923)
  *
  *  STATUS: TODO
  * =====================================================
@@ -23,7 +23,7 @@ var logger = require('../../../../shared/utils/logger');
 
 function handle(socket, parsed, callback) {
     var userId = parsed.userId;
-    logger.info('ACTIVITY', 'shopBuy' + ' userId=' + userId);
+    logger.info('ACTIVITY', 'beStrongRefreshDiscount' + ' userId=' + userId);
 
     // TODO: Implement business logic
 

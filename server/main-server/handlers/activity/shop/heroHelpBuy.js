@@ -2,17 +2,17 @@
 
 /**
  * =====================================================
- *  activity/shop/shopBuy.js
+ *  activity/shop/heroHelpBuy.js
  *  Super Warrior Z Game Server — Main Server
  *
- *  ACTION: shopBuy
- *  DESC: Buy item from activity shop
+ *  ACTION: heroHelpBuy
+ *  DESC: Purchase hero help/assist item
  *  TYPE: WRITE
  *
  *  CLIENT REQUEST:
- *    { type:"activity", action:"shopBuy", actId, userId, itemId, num }
+ *    { type:"activity", action:"heroHelpBuy", actId, userId, itemId, heroIds }
  *
- *  CLIENT SOURCE: ActivitySetReward.ShopBuyReward() (line ~79577)
+ *  CLIENT SOURCE: SureFunc() (line 92487)
  *
  *  STATUS: TODO
  * =====================================================
@@ -23,7 +23,7 @@ var logger = require('../../../../shared/utils/logger');
 
 function handle(socket, parsed, callback) {
     var userId = parsed.userId;
-    logger.info('ACTIVITY', 'shopBuy' + ' userId=' + userId);
+    logger.info('ACTIVITY', 'heroHelpBuy' + ' userId=' + userId);
 
     // TODO: Implement business logic
 
