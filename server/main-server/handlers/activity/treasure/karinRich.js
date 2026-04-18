@@ -2,17 +2,17 @@
 
 /**
  * =====================================================
- *  activity/treasure/karinRichTask.js
+ *  activity/treasure/karinRich.js
  *  Super Warrior Z Game Server — Main Server
  *
- *  ACTION: karinRichTask
- *  DESC: Submit progress for Karin rich task
+ *  ACTION: karinRich
+ *  DESC: Open Karin rich reward chest
  *  TYPE: WRITE
  *
  *  CLIENT REQUEST:
- *    { type:"activity", action:"karinRichTask", actId, userId, taskId }
+ *    { type:"activity", action:"karinRich", userId, actId, version }
  *
- *  CLIENT SOURCE: ActivitySetReward.KarinRichReward() (line ~79577)
+ *  CLIENT SOURCE: box click (line 90235)
  *
  *  RESPONSE (Universal):
  *    { _changeInfo: { _items: {...} },
@@ -28,7 +28,7 @@ var logger = require('../../../../shared/utils/logger');
 
 function handle(socket, parsed, callback) {
     var userId = parsed.userId;
-    logger.info('ACTIVITY', 'karinRichTask' + ' userId=' + userId);
+    logger.info('ACTIVITY', 'karinRich' + ' userId=' + userId);
 
     // TODO: Implement business logic
 
