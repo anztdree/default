@@ -2,17 +2,17 @@
 
 /**
  * =====================================================
- *  activity/hero/newHeroChallenge.js
+ *  activity/hero/heroGiftReward.js
  *  Super Warrior Z Game Server — Main Server
  *
- *  ACTION: newHeroChallenge
- *  DESC: Initiate new hero challenge attempt
+ *  ACTION: heroGiftReward
+ *  DESC: Claim hero gift activity reward
  *  TYPE: WRITE
  *
  *  CLIENT REQUEST:
- *    { type:"activity", action:"newHeroChallenge", actId, team, teamOrder, topn, userId }
+ *    { type:"activity", action:"heroGiftReward", actId, userId, pick, itemId }
  *
- *  CLIENT SOURCE: NewHeroChallenge battle initiation (line 65237)
+ *  CLIENT SOURCE: ActivitySetReward.heroGiftReward() (line ~79577)
  *
  *  RESPONSE (Universal):
  *    { _changeInfo: { _items: {...} },
@@ -28,7 +28,7 @@ var logger = require('../../../../shared/utils/logger');
 
 function handle(socket, parsed, callback) {
     var userId = parsed.userId;
-    logger.info('ACTIVITY', 'newHeroChallenge' + ' userId=' + userId);
+    logger.info('ACTIVITY', 'heroGiftReward' + ' userId=' + userId);
 
     // TODO: Implement business logic
 

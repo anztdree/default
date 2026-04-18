@@ -2,17 +2,17 @@
 
 /**
  * =====================================================
- *  activity/hero/newHeroChallenge.js
+ *  activity/hero/newHeroChallengeQueryWinRank.js
  *  Super Warrior Z Game Server — Main Server
  *
- *  ACTION: newHeroChallenge
- *  DESC: Initiate new hero challenge attempt
+ *  ACTION: newHeroChallengeQueryWinRank
+ *  DESC: Query win rank for new hero challenge
  *  TYPE: WRITE
  *
  *  CLIENT REQUEST:
- *    { type:"activity", action:"newHeroChallenge", actId, team, teamOrder, topn, userId }
+ *    { type:"activity", action:"newHeroChallengeQueryWinRank", actId, userId, topn }
  *
- *  CLIENT SOURCE: NewHeroChallenge battle initiation (line 65237)
+ *  CLIENT SOURCE: headItem tap (line 100136)
  *
  *  RESPONSE (Universal):
  *    { _changeInfo: { _items: {...} },
@@ -28,7 +28,7 @@ var logger = require('../../../../shared/utils/logger');
 
 function handle(socket, parsed, callback) {
     var userId = parsed.userId;
-    logger.info('ACTIVITY', 'newHeroChallenge' + ' userId=' + userId);
+    logger.info('ACTIVITY', 'newHeroChallengeQueryWinRank' + ' userId=' + userId);
 
     // TODO: Implement business logic
 
