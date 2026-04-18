@@ -2,17 +2,17 @@
 
 /**
  * =====================================================
- *  activity/imprint/refreshImprint.js
+ *  activity/imprint/imprintExtraction.js
  *  Super Warrior Z Game Server — Main Server
  *
- *  ACTION: refreshImprint
- *  DESC: Refresh available imprint options
+ *  ACTION: imprintExtraction
+ *  DESC: Extract an imprint from the imprint pool
  *  TYPE: WRITE
  *
  *  CLIENT REQUEST:
- *    { type:"activity", action:"refreshImprint", userId, actId, imprintId }
+ *    { type:"activity", action:"imprintExtraction", actId, userId, imprintIds[], version }
  *
- *  CLIENT SOURCE: wash btn tap (line 98774)
+ *  CLIENT SOURCE: extraction btn tap (line 94338)
  *
  *  RESPONSE (Universal):
  *    { _changeInfo: { _items: {...} },
@@ -28,7 +28,7 @@ var logger = require('../../../../shared/utils/logger');
 
 function handle(socket, parsed, callback) {
     var userId = parsed.userId;
-    logger.info('ACTIVITY', 'refreshImprint' + ' userId=' + userId);
+    logger.info('ACTIVITY', 'imprintExtraction' + ' userId=' + userId);
 
     // TODO: Implement business logic
 

@@ -2,17 +2,17 @@
 
 /**
  * =====================================================
- *  activity/imprint/refreshImprint.js
+ *  activity/imprint/imprintUpGetReward.js
  *  Super Warrior Z Game Server — Main Server
  *
- *  ACTION: refreshImprint
- *  DESC: Refresh available imprint options
+ *  ACTION: imprintUpGetReward
+ *  DESC: Claim imprint upgrade level reward
  *  TYPE: WRITE
  *
  *  CLIENT REQUEST:
- *    { type:"activity", action:"refreshImprint", userId, actId, imprintId }
+ *    { type:"activity", action:"imprintUpGetReward", actId, userId, itemId, pick }
  *
- *  CLIENT SOURCE: wash btn tap (line 98774)
+ *  CLIENT SOURCE: ActivitySetReward.signUpUp() (line ~79577)
  *
  *  RESPONSE (Universal):
  *    { _changeInfo: { _items: {...} },
@@ -28,7 +28,7 @@ var logger = require('../../../../shared/utils/logger');
 
 function handle(socket, parsed, callback) {
     var userId = parsed.userId;
-    logger.info('ACTIVITY', 'refreshImprint' + ' userId=' + userId);
+    logger.info('ACTIVITY', 'imprintUpGetReward' + ' userId=' + userId);
 
     // TODO: Implement business logic
 

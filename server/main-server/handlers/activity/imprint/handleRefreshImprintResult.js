@@ -2,17 +2,17 @@
 
 /**
  * =====================================================
- *  activity/imprint/refreshImprint.js
+ *  activity/imprint/handleRefreshImprintResult.js
  *  Super Warrior Z Game Server — Main Server
  *
- *  ACTION: refreshImprint
- *  DESC: Refresh available imprint options
+ *  ACTION: handleRefreshImprintResult
+ *  DESC: Process result of imprint refresh
  *  TYPE: WRITE
  *
  *  CLIENT REQUEST:
- *    { type:"activity", action:"refreshImprint", userId, actId, imprintId }
+ *    { type:"activity", action:"handleRefreshImprintResult", actId, userId, imprintId, save }
  *
- *  CLIENT SOURCE: wash btn tap (line 98774)
+ *  CLIENT SOURCE: confirm/replace imprint (line 170304)
  *
  *  RESPONSE (Universal):
  *    { _changeInfo: { _items: {...} },
@@ -28,7 +28,7 @@ var logger = require('../../../../shared/utils/logger');
 
 function handle(socket, parsed, callback) {
     var userId = parsed.userId;
-    logger.info('ACTIVITY', 'refreshImprint' + ' userId=' + userId);
+    logger.info('ACTIVITY', 'handleRefreshImprintResult' + ' userId=' + userId);
 
     // TODO: Implement business logic
 

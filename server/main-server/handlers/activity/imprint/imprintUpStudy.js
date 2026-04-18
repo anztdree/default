@@ -2,17 +2,17 @@
 
 /**
  * =====================================================
- *  activity/imprint/refreshImprint.js
+ *  activity/imprint/imprintUpStudy.js
  *  Super Warrior Z Game Server — Main Server
  *
- *  ACTION: refreshImprint
- *  DESC: Refresh available imprint options
+ *  ACTION: imprintUpStudy
+ *  DESC: Study/activate an imprint upgrade skill
  *  TYPE: WRITE
  *
  *  CLIENT REQUEST:
- *    { type:"activity", action:"refreshImprint", userId, actId, imprintId }
+ *    { type:"activity", action:"imprintUpStudy", actId, userId, imprintType, sellQuality[], times, version }
  *
- *  CLIENT SOURCE: wash btn tap (line 98774)
+ *  CLIENT SOURCE: SendLearnQuest() (line 97226)
  *
  *  RESPONSE (Universal):
  *    { _changeInfo: { _items: {...} },
@@ -28,7 +28,7 @@ var logger = require('../../../../shared/utils/logger');
 
 function handle(socket, parsed, callback) {
     var userId = parsed.userId;
-    logger.info('ACTIVITY', 'refreshImprint' + ' userId=' + userId);
+    logger.info('ACTIVITY', 'imprintUpStudy' + ' userId=' + userId);
 
     // TODO: Implement business logic
 
