@@ -477,6 +477,23 @@ async function handleCheckBattleResult(socket, parsed, callback) {
             applyItemDeltas(gameData.totalProps._items, awardItems);
         }
 
+        // BUG FIX: _changeInfo._items must contain ABSOLUTE counts (after applying awards),
+        // NOT raw award deltas. The client uses setItem(id, _num) which sets the absolute value.
+        // If we send raw award num (e.g. gold=1000), the client OVERWRITES the actual balance
+        // (e.g. gold was 508 after upgrades) with 1000, losing the upgrade deduction.
+        // autoLevelUp already sends absolute counts — checkBattleResult must match.
+        var changeItems = {};
+        if (gameData.totalProps && gameData.totalProps._items) {
+            var awardKeys = Object.keys(awardItems);
+            for (var ai = 0; ai < awardKeys.length; ai++) {
+                var aKey = awardKeys[ai];
+                var aItem = gameData.totalProps._items[aKey];
+                if (aItem) {
+                    changeItems[aKey] = { _id: aItem._id, _num: aItem._num };
+                }
+            }
+        }
+
         // Update hangup state
         var newCurLess = curLess;
         var newMaxPassLesson = Math.max(curLess, maxPassLesson);
@@ -523,7 +540,7 @@ async function handleCheckBattleResult(socket, parsed, callback) {
             _curLess: newCurLess,
             _maxPassLesson: newMaxPassLesson,
             _maxPassChapter: newMaxPassChapter,
-            _changeInfo: { _items: awardItems }
+            _changeInfo: { _items: changeItems }
         }));
 
     } catch (err) {

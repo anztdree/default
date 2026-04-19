@@ -2113,14 +2113,18 @@ function getHeroQuality(heroData) {
  * @param {object} heroData - Hero instance
  */
 function initTotalCost(heroData) {
-    if (!heroData._totalCost) {
-        heroData._totalCost = {
-            _levelUp: [],
-            _evolve: [],
-            _qigong: [],
-            _heroBreak: [],
-            _wakeUp: []
-        };
+    if (!heroData._totalCost || typeof heroData._totalCost !== 'object') {
+        heroData._totalCost = {};
+    }
+    // Ensure all known categories are arrays (not {} or other truthy non-arrays).
+    // BUG FIX: _totalCost sub-properties were sometimes initialized as {} instead of [],
+    // causing "entries.push is not a function" in addTotalCostEntry.
+    var categories = ['_levelUp', '_evolve', '_qigong', '_heroBreak', '_wakeUp', '_earring', '_skill'];
+    for (var i = 0; i < categories.length; i++) {
+        var cat = categories[i];
+        if (!Array.isArray(heroData._totalCost[cat])) {
+            heroData._totalCost[cat] = [];
+        }
     }
 }
 
@@ -2135,12 +2139,14 @@ function initTotalCost(heroData) {
  */
 function addTotalCostEntry(heroData, category, itemId, amount) {
     initTotalCost(heroData);
-    if (!heroData._totalCost['_' + category]) {
-        heroData._totalCost['_' + category] = [];
+    var catKey = '_' + category;
+    // Defensive: ensure the category is an array even if initTotalCost missed it
+    if (!Array.isArray(heroData._totalCost[catKey])) {
+        heroData._totalCost[catKey] = [];
     }
 
     // Find existing entry for this item and accumulate
-    var entries = heroData._totalCost['_' + category];
+    var entries = heroData._totalCost[catKey];
     var found = false;
     for (var i = 0; i < entries.length; i++) {
         if (entries[i]._id == itemId) {
@@ -2293,14 +2299,15 @@ function calculateHeroPower(heroData) {
     if (!heroData) return 0;
 
     var attrs = calculateHeroAttrs(heroData);
-    var totalItems = attrs._totalAttr._items || [];
+    var totalItems = attrs._totalAttr._items || {};
 
+    // BUG FIX: _totalAttr._items is an OBJECT (keyed by attr ID string), NOT an array.
+    // Old code iterated with for(i=0; i<totalItems.length; i++) which NEVER executed
+    // because objects don't have a meaningful .length. Now reads by key.
     var hp = 0, attack = 0, armor = 0;
-    for (var i = 0; i < totalItems.length; i++) {
-        if (totalItems[i]._id === 0) hp = totalItems[i]._num || 0;
-        else if (totalItems[i]._id === 1) attack = totalItems[i]._num || 0;
-        else if (totalItems[i]._id === 2) armor = totalItems[i]._num || 0;
-    }
+    if (totalItems['0']) hp = totalItems['0']._num || 0;
+    if (totalItems['1']) attack = totalItems['1']._num || 0;
+    if (totalItems['2']) armor = totalItems['2']._num || 0;
 
     var paraA = getConstant('zPowerFormulaParaA') || 100;
     var paraB = getConstant('zPowerFormulaParaB') || 5;
