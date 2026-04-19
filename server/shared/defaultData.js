@@ -620,7 +620,11 @@ function generateNewUserData(userId, nickName, serverId) {
 
         // guide (line 77654): GuideInfoManager.setGuideInfo(e.guide)
         // Guarded: e.guide &&  ... reads _id, _steps
-        guide: {_id: '', _steps: {}},
+        // _id MUST be userId — client uses it to identify guide owner.
+        // Empty _id causes startGuide() to return 0 → Home.initAll() SKIPS entirely
+        // → activity icons, battle buttons, summon, ALL Home UI not rendered!
+        // _steps: {} = new player = tutorial will START (startGuide returns non-zero)
+        guide: {_id: userId, _steps: {}},
 
         // timeMachine (line 77655): TimeLeapSingleton.initData(e.timeMachine)
         // Guarded: e.timeMachine &&  ... TimeMachineItem reads _level, _heroId, _heroDisplayId, _timeType, _finishTime
