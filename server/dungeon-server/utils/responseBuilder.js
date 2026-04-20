@@ -60,7 +60,7 @@ function buildHttpResponse(dataObj) {
         data: JSON.stringify(dataObj || {}),
         compress: false,
         serverTime: now,
-        server0Time: now,
+        server0Time: RH.SERVER_UTC_OFFSET_MS,
     };
 }
 
@@ -78,7 +78,7 @@ function buildHttpError(code, msg) {
         data: msg || '',
         compress: false,
         serverTime: now,
-        server0Time: now,
+        server0Time: RH.SERVER_UTC_OFFSET_MS,
     };
 }
 
