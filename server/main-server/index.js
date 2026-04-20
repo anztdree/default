@@ -337,7 +337,7 @@ io.on('connection', function (socket) {
         // Helper: send verify result to client via callback
         function sendVerifyResult(code) {
             if (typeof callback === 'function') {
-                callback({ ret: code, compress: false, serverTime: Date.now(), server0Time: Date.now() });
+                callback({ ret: code, compress: false, serverTime: Date.now(), server0Time: ResponseHelper.SERVER_UTC_OFFSET_MS });
             }
         }
 
@@ -487,7 +487,7 @@ io.on('connection', function (socket) {
             // Invalidate user data cache (data may change while offline)
             try {
                 var UserDataService = require('./services/userDataService');
-                UserDataService.invalidateCache(socket._userId);
+                UserDataService.invalidateCache(socket._userId, socket._serverId);
             } catch (e) {
                 // Service may not be available during early disconnect
             }
