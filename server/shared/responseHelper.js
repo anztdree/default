@@ -24,6 +24,24 @@
  *   if("SUCCESS" == t.ret) { ... process push ... }
  *   Push uses ret = "SUCCESS" (string)
  * 
+ * SERVER0TIME EXPLANATION (line 116952-116954):
+ *   ServerTime class updateServerTime:
+ *     e._ts = t;                                          // serverTime (current timestamp)
+ *     e._offTime = 60 * new Date().getTimezoneOffset() * 1000 - n;  // n = server0Time
+ *     e.getServerLocalDate() = new Date(e._ts + e._offTime);
+ *   
+ *   PROOF: server0Time = -(server's UTC offset in ms)
+ *   For getServerLocalDate() to return correct server local time:
+ *     UTC+7 client: getTimezoneOffset()=-420, _offTime = -25200000 - server0Time
+ *     For server local time: need _offTime=0 → server0Time = -25200000
+ *   
+ *   WRONG value +25200000 causes _offTime=-50400000, making getServerLocalDate()
+ *   14 hours behind UTC → ALL time-based features broken (daily reset, dungeons, events).
+ *   
+ *   CORRECT: server0Time = -(server_tz_offset_ms)
+ *     UTC+7 (Jakarta)  = -25200000
+ *     UTC+8 (Singapore) = -28800000
+ * 
  * ERROR CODES from resource/json/errorDefine.json (365 codes):
  *   1 = ERROR_UNKNOWN
  *   12 = ERROR_USER_LOGIN_BEFORE (user already logged in)
@@ -33,7 +51,7 @@
  *   51 = GAME_SERVER_OFFLINE
  *   62 = CLIENT_VERSION_ERR
  *   65 = MAINTAIN
- *   57003 = USER_NOT_REGIST (KICK)
+ * 57003 = USER_NOT_REGIST (KICK)
  * 
  * REQUEST FORMAT:
  *   Client sends all requests via "handler.process" event:
@@ -44,6 +62,26 @@
 // =============================================
 // 1. RESPONSE BUILDERS
 // =============================================
+
+/**
+ * server0Time = NEGATIVE of server's UTC offset in milliseconds.
+ *
+ * Client formula (main.min.js line 116952-116954):
+ *   _offTime = 60 * getTimezoneOffset() * 1000 - server0Time
+ *   getServerLocalDate() = new Date(serverTime + _offTime)
+ *
+ * For getServerLocalDate() to return correct server local time:
+ *   server0Time must equal -(server_tz_offset_ms).
+ *   UTC+7: server0Time = -25200000
+ *   UTC+8: server0Time = -28800000
+ *
+ * WRONG value +25200000 causes _offTime = -50400000 for UTC+7 client,
+ * making server time 14 hours behind UTC → ALL time features broken.
+ *
+ * Read from SERVER_UTC_OFFSET_MS env var (set in .env).
+ * Falls back to -25200000 (UTC+7) if not set.
+ */
+var SERVER_UTC_OFFSET_MS = parseInt(process.env.SERVER_UTC_OFFSET_MS) || -25200000;
 
 /**
  * Build success response
@@ -76,8 +114,8 @@ function success(dataObj, compress) {
         ret: 0,           // 0 = SUCCESS (number, strict equality: 0 === e.ret)
         data: dataStr,
         compress: !!compress,
-        serverTime: now,  // Current server timestamp
-        server0Time: now, // Same timestamp reference
+        serverTime: now,  // Current server timestamp (dynamic)
+        server0Time: SERVER_UTC_OFFSET_MS,  // -(server_tz_offset_ms), e.g. -25200000 for UTC+7
     };
 }
 
@@ -98,11 +136,11 @@ function success(dataObj, compress) {
  *   14 = ERROR_USER_NOT_LOGOUT - User not logged out
  *   38 = ERROR_LOGIN_CHECK_FAILED - Login check failed (triggers reload!)
  *   45 = FORBIDDEN_LOGIN - Login forbidden
- *   47 = NOT_ENABLE_REGIST - Registration not enabled
+   * 47 = NOT_ENABLE_REGIST - Registration not enabled
  *   51 = GAME_SERVER_OFFLINE - Game server offline
  *   62 = CLIENT_VERSION_ERR - Client version error
  *   65 = MAINTAIN - Server maintenance
- *   57003 = USER_NOT_REGIST - User not registered (KICK)
+ * 57003 = USER_NOT_REGIST - User not registered (KICK)
  * 
  * @param {number} code - Error code from errorDefine.json
  * @param {string} dataStr - Optional error data string
@@ -114,7 +152,7 @@ function error(code, dataStr) {
         data: dataStr || '',
         compress: false,
         serverTime: Date.now(),
-        server0Time: Date.now(),
+        server0Time: SERVER_UTC_OFFSET_MS,  // -(server_tz_offset_ms), e.g. -25200000 for UTC+7
     };
 }
 
@@ -123,7 +161,7 @@ function error(code, dataStr) {
  * Client expects: ret="SUCCESS" (string literal)
  * 
  * Client source (line 77182):
- *   if("SUCCESS" == t.ret) { ... process push data ... }
+ *   if("SUCCESS" == t.ret) { ... process push ... }
  * 
  * Client reads action from INSIDE the parsed data (line 77186):
  *   var o = JSON.parse(t.data);
@@ -143,7 +181,7 @@ function push(dataObj) {
         // FIX #6: Removed top-level action — client reads action from inside data payload
         compress: false,  // FIX #3: Added for consistency — notify data is never compressed
         serverTime: now,
-        server0Time: now,
+        server0Time: SERVER_UTC_OFFSET_MS,  // -(server_tz_offset_ms), e.g. -25200000 for UTC+7
     };
 }
 
@@ -254,4 +292,5 @@ module.exports = {
     parseRequest: parseRequest,
     sendResponse: sendResponse,
     ErrorCode: ErrorCode,
+    SERVER_UTC_OFFSET_MS: SERVER_UTC_OFFSET_MS,
 };

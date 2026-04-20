@@ -179,10 +179,12 @@ function generateNewUserData(userId, nickName, serverId) {
 
         // currency (line 77642): ts.currency = e.currency
         // Client reads unconditionally: ts.currency = e.currency
-        currency: {
-            _diamond: GAME_CONSTANTS.startDiamond,
-            _gold: GAME_CONSTANTS.startGold,
-        },
+        // CRITICAL: Must be a STRING — used as key into currencyDisplay config:
+        //   ReadJsonSingleton.getInstance().currencyDisplay[ts.currency] (line 83819)
+        // Valid values: "CNY", "USD", "KRW", "VND", "IRR" (from currencyDisplay.json)
+        // HAR verified: real server sends "USD"
+        // Diamond/gold values are in totalProps._items, NOT here.
+        currency: 'USD',
 
         // broadcastRecord (line 77449): ts.chatJoinRecord({_record: t.broadcastRecord})
         // Client iterates with for(var o in t) — must be array (chat message list)
@@ -248,7 +250,10 @@ function generateNewUserData(userId, nickName, serverId) {
         // genki (line 77705): genkiDataModel.deserialize(e.genki)
         // Guarded: e.genki && t.genkiDataModel.deserialize(e.genki)
         // GenkiItem reads: _level, _heroId, _heroDisplayId, _timeType, _finishTime
-        genki: {_items: []},
+        // GenkiModel.deserialize strips '_' prefix via isCommonType → stores as:
+        //   e.genki._curSmeltNormalExp → this.curSmeltNormalExp
+        //   e.genki._curSmeltSuperExp → this.curSmeltSuperExp
+        genki: {_items: [], _curSmeltNormalExp: 0, _curSmeltSuperExp: 0},
 
         // heros (line 77687): HerosManager.readByData(e.heros)
         // Reads e.heros._heros as {[heroId]: {hero data}}
@@ -277,12 +282,57 @@ function generateNewUserData(userId, nickName, serverId) {
             _cellGameHaveTimes: 0,
             _cellgameHaveSetHero: false,         // boolean, default false in constructor
             _strongEnemyTimes: 0,
+            // _refreshTime: daily reset timestamp
+            // NOT read by client's AllRefreshCount.initData() — used by SERVER-SIDE
+            // daily reset scheduler to determine when last reset occurred.
+            //
+            // BUG FIX: Was Date.now() (creation time) which broke daily reset logic.
+            //   - Scheduler checks: if lastReset + 24h < now, trigger reset
+            //   - Date.now() = "just now" → scheduler thinks reset happened seconds ago
+            //   - Result: counters never reset until 24h after account creation
+            //
+            // CORRECT: Last 6 AM server local time (UTC+7).
+            //   - If user logs in after 6 AM → last reset = today 6 AM → no immediate reset
+            //   - If user logs in before 6 AM → last reset = yesterday 6 AM → scheduler may reset
+            //   - Server uses SERVER_UTC_OFFSET_MS from .env (-25200000 = UTC+7)
+            // TIMEZONE-INDEPENDENT 6 AM calculation.
+            // Does NOT rely on machine's local timezone (setHours).
+            // Uses pure math: converts UTC ms → server local wall clock ms → finds 6 AM → converts back.
+            //
+            // Math: UTC+7 offset = -25200000 ms
+            //   server local ms = UTC ms + 25200000 (shift to show wall clock time)
+            //   6 AM local = floor(local / 86400000) * 86400000 + 6*3600000
+            //   6 AM UTC   = 6 AM local - 25200000
+            _refreshTime: (function() {
+                var offset = parseInt(process.env.SERVER_UTC_OFFSET_MS) || -25200000;
+                var tzOffsetMs = Math.abs(offset); // 25200000 for UTC+7
+                var MS_PER_DAY = 86400000;
+                var now = Date.now();
+                var serverLocalNow = now + tzOffsetMs; // Pretend local time = UTC to get wall clock ms
+                var todayMidnight = Math.floor(serverLocalNow / MS_PER_DAY) * MS_PER_DAY;
+                var sixAMLocal = todayMidnight + 6 * 3600000; // 6 AM today server time
+                // If 6 AM hasn't happened yet today, use yesterday 6 AM
+                if (sixAMLocal > serverLocalNow) {
+                    sixAMLocal -= MS_PER_DAY;
+                }
+                return sixAMLocal - tzOffsetMs; // Convert back to UTC ms
+            })(),
+            // _arenaHaveJoinToday: NOT in client's AllRefreshCount.initData()
+            // (present in constructor default but not read during init)
+            // Kept for potential server-side use. Safe to include.
+            _arenaHaveJoinToday: false,
             _strongEnemyBuyCount: 0,
             _mergeBossBuyCount: 0,
             // CounterpartSingleton.setCounterPartTime(e._dungeonTimes) — unconditional
-            _dungeonTimes: 0,
+            // Client iterates: for (var n in e) — MUST be object, NOT number (line 92494)
+            // HAR verified: {'1':2, '2':2, '4':2, '5':2, '7':2, '8':2} (dungeon type → times)
+            // DUNGEON_TYPE enum (line 92520): 1=EXP, 2=EVOLVE, 3=ENERGY, 4=EQUIP, 5=SINGA, 6=SINGB, 7=METAL, 8=Z_STONE
+            // New player: empty object (no dungeons attempted yet)
+            _dungeonTimes: {},
             // CounterpartSingleton.setCounterPartBuyCount(e._dungeonBuyTimesCount) — unconditional
-            _dungeonBuyTimesCount: 0,
+            // Same pattern: iterates with for(var n in e) — MUST be object
+            // HAR verified: {'1':0, '2':0, '4':0, '5':0, '7':0, '8':0}
+            _dungeonBuyTimesCount: {},
             _karinBattleTimes: 0,
             _karinBuyBattleTimesCount: 0,
             _karinBuyFeetCount: 0,
@@ -413,9 +463,11 @@ function generateNewUserData(userId, nickName, serverId) {
 
         // enableShowQQ, showQQVip, showQQ, showQQImg1, showQQImg2, showQQUrl
         // QQ platform-specific fields
+        // HAR verified: real server sends number (0), not boolean
+        // Client direct assignment: WelfareInfoManager.showQQVip = e.showQQVip (line 114840)
         enableShowQQ: false,
-        showQQVip: false,
-        showQQ: false,
+        showQQVip: 0,
+        showQQ: 0,
         showQQImg1: '',
         showQQImg2: '',
         showQQUrl: '',
@@ -615,8 +667,22 @@ function generateNewUserData(userId, nickName, serverId) {
         dragonEquiped: {},
 
         // timesInfo (line 77653): TimesInfoSingleton.initData(e.timesInfo)
-        // Guarded: e.timesInfo &&  ... reads templeTimes, mineSteps, karinFeet, mahaTimes, etc.
-        timesInfo: {templeTimes: 10, mineSteps: 0, karinFeet: 5, mahaTimes: 0, marketRefreshTimes: 0, mahaGoldBuyCount: 0, treasureTimes: 0, mahaInviteCount: 0, mahaRecoverBuyCount: 0, mahaRecoverTimes: 0},
+        // Guarded: e.timesInfo &&  ... BUT initData reads 12 fields UNCONDITIONALLY (line 96001-96010):
+        //   e.marketRefreshTimes, e.marketRefreshTimesRecover,
+        //   e.vipMarketRefreshTimes, e.vipMarketRefreshTimesRecover,
+        //   e.templeTimes, e.templeTimesRecover,
+        //   e.mahaTimes, e.mahaTimesRecover,
+        //   e.mineSteps, e.mineStepsRecover,
+        //   e.karinFeet, e.karinFeetRecover
+        // HAR verified: real server sends all 12 fields. Missing *Recover = client crash.
+        timesInfo: {
+            templeTimes: 10, templeTimesRecover: 0,
+            mineSteps: 0, mineStepsRecover: 0,
+            karinFeet: 5, karinFeetRecover: 0,
+            mahaTimes: 0, mahaTimesRecover: 0,
+            marketRefreshTimes: 0, marketRefreshTimesRecover: 0,
+            vipMarketRefreshTimes: 0, vipMarketRefreshTimesRecover: 0,
+        },
 
         // guide (line 77654): GuideInfoManager.setGuideInfo(e.guide)
         // Guarded: e.guide &&  ... reads _id, _steps
@@ -792,6 +858,21 @@ function mergeWithDefaults(loadedData, userId, nickName, serverId) {
             // It's an object — ensure it has the required fields
             if (typeof og._curId !== 'number') og._curId = 0;
             if (typeof og._nextTime !== 'number') og._nextTime = 0;
+        }
+    }
+
+    // FIX: Validate guide._id
+    // Client startGuide() checks guide._id — if empty/missing, returns 0
+    // → Home.initAll() SKIPS entire home UI (no activity buttons, no battle, nothing)
+    // guide must be an object with non-empty _id string
+    if (defaults.guide === null || defaults.guide === undefined || typeof defaults.guide !== 'object') {
+        defaults.guide = { _id: userId, _steps: {} };
+    } else {
+        if (!defaults.guide._id || typeof defaults.guide._id !== 'string' || defaults.guide._id.trim() === '') {
+            defaults.guide._id = userId;
+        }
+        if (!defaults.guide._steps || typeof defaults.guide._steps !== 'object') {
+            defaults.guide._steps = {};
         }
     }
 
