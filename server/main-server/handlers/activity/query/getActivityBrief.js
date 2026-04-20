@@ -7,252 +7,226 @@
  *
  *  ACTION: getActivityBrief — Return filtered list of active activities.
  *
- *  STATUS: SEMPURNA — 100% sesuai main.min.js client code & HAR
+ *  ARCHITECTURE: Natural data flow
+ *    resource/json/activityDefine.json (single source of truth)
+ *      → GameData.get('activityDefine') (loaded at server startup)
+ *        → getActivityBrief handler (filter by day, strip server fields)
+ *          → client _acts response
+ *
+ *  No hardcoded data. No dummy entries. No forced overrides.
+ *  Activity definitions live in activityDefine.json alongside
+ *  the other 471 game config files. Adding/removing activities
+ *  only requires editing the JSON — zero code changes.
  *
  *  ═══════════════════════════════════════════════════════
- *  ALUR KERJA HANDLER:
+ *  ALUR KERJA:
  *
- *  1. Baca ACTIVITY_BRIEF_LIST dari _config.js
- *  2. Filter menggunakan ActivityManager.isActivityAvailableByDay()
- *     — Cek minDay ≤ openServerDays ≤ maxDay
- *  3. Deep clone setiap aktivitas yang lolos filter
- *  4. HITUNG endTime dinamis berdasarkan schedule:
- *     - timeType=1 (fixed): endTime = serverOpenDate + (startDay + durationDay) * 86400000
- *     - timeType=2 (relative): tidak ada endTime
- *     - Hanya kirim endTime untuk REGRESSION (actCycle=17) activities
- *       karena client hanya pakai endTime untuk regressActEndtime
- *  5. STRIP server-only fields dari response
- *  6. STRIP conditional fields jika tidak relevan:
- *     - cycleType: strip jika sama dengan actCycle (redundan)
- *     - poolId: strip jika 0 (tidak ada pool)
- *     - endTime: strip jika 0/falsy
- *     - hangupReward: strip jika null/undefined
- *     - haveExReward: strip jika bukan actType=1001
- *  7. Build ACTS_MAP { [id]: activityObj }
- *  8. Return { type, action, userId, version, _acts }
+ *  1. Load activityDefine dari GameData (resource/json/)
+ *  2. Filter: isActivityAvailableByDay() → minDay <= openServerDays <= maxDay
+ *  3. Build entry dari definisi — hanya field yang dibutuhkan client
+ *  4. Compute endTime dinamis (hanya REGRESSION, actCycle=17, timeType=1)
+ *  5. Include conditional fields hanya ketika bermakna:
+ *     - cycleType: hanya jika != actCycle (FB/iOS activities)
+ *     - poolId: hanya jika > 0 (pool-based activities)
+ *     - haveExReward: hanya untuk actType=1001 (LOGIN)
+ *     - hangupReward: hanya untuk actType=100 (ITEM_DROP)
+ *     - endTime: hanya untuk REGRESSION countdown
+ *  6. Return { type, action, userId, version, _acts }
  *
  *  ═══════════════════════════════════════════════════════
- *  CLIENT REQUEST (main.min.js line 168092-168096):
+ *  CLIENT REQUEST (main.min.js line 234743):
  *    { type:"activity", action:"getActivityBrief", userId, version:"1.0" }
  *
- *  CLIENT CALLBACKS (2 call sites):
- *    1. Home.setActs (line 168087) — main entry, populates activity bar
- *    2. backToActivityPage (line 57528) — returning from activity detail
+ *  CLIENT CALLBACK — Home.setActs (line 234743):
+ *    Iterates t._acts, reads per entry:
+ *      r.id          — UUID
+ *      r.actType     — routing: NEW_USER_MAIL/FB_SHARE/ITEM_DROP/.../DEFAULT
+ *      r.actCycle    — groups activities into tabs
+ *      r.cycleType   — only read by checkLikeIsOn (FBGIVELIKE/IOSGIVELIKE)
+ *      r.poolId      — only read for pool-based activities
+ *      r.endTime     — only read for REGRESSION countdown
+ *      r.hangupReward — only read for ITEM_DROP
+ *      r.icon        — activity icon path (setActivityList line 155530)
+ *      r.displayIndex — sort desc within cycle tab
+ *      r.showRed     — red dot indicator
+ *
+ *  CLIENT CALLBACK — backToActivityPage (line 90691):
+ *    Filters t._acts by actCycle, passes matching entries to BaseActivity.
  *
  *  ═══════════════════════════════════════════════════════
- *  RESPONSE FORMAT — objek per aktivitas di _acts:
+ *  RESPONSE FORMAT per aktivitas di _acts (verified HAR):
  *
- *    {
- *      id:           string   — UUID aktivitas
- *      templateName: string   — Nama template (HAR field, client tidak baca)
- *      name:         string   — Nama display (HAR field, client tidak baca)
- *      icon:         string   — Path ikon (line 103410, 168162)
- *      displayIndex: number   — Sort desc (line 103407)
- *      showRed:      boolean  — Flag red dot (line 103414)
- *      actCycle:     number   — ACTIVITY_CYCLE enum (line 168104)
- *      actType:      number   — ACTIVITY_TYPE enum (line 168104)
- *      haveExReward: boolean  — Hanya actType=1001 LOGIN (HAR field)
- *    }
+ *  BASE FIELDS (selalu dikirim):
+ *    id           string   — UUID
+ *    templateName string   — template name (HAR field, client tidak baca)
+ *    name         string   — display name (HAR field, client tidak baca)
+ *    icon         string   — icon path
+ *    displayIndex number   — sort descending
+ *    showRed      boolean  — red dot flag
+ *    actCycle     number   — ACTIVITY_CYCLE enum → tab grouping
+ *    actType      number   — ACTIVITY_TYPE enum → routing
  *
- *    CONDITIONAL FIELDS (only when meaningful):
- *      cycleType:    number   — Jika != actCycle (FB/iOS activities)
- *                               Dibaca checkLikeIsOn (line 168104)
- *                               Default = actCycle
- *      poolId:       number   — Jika > 0 (pool-based activities)
- *                               Dibaca setActivityList (line 103411)
- *                               & getActivityDetail request (line 168191)
- *      endTime:      number   — Hanya REGRESSION actCycle=17
- *                               Dibaca setActs (line 168102)
- *                               Drives regressActEndtime + setTimeLimitBags()
- *      hangupReward: object   — Hanya actType=100 ITEM_DROP
- *                               Dibaca setActs (line 168104)
- *    }
+ *  CONDITIONAL FIELDS (hanya ketika bermakna):
+ *    cycleType    number   — != actCycle → FB/iOS activities
+ *    poolId       number   — > 0 → pool-based
+ *    haveExReward boolean  — actType=1001 (LOGIN) only
+ *    endTime      number   — actCycle=17 (REGRESSION) only
+ *    hangupReward object   — actType=100 (ITEM_DROP) only
  *
- *    FIELD YANG DI-STRIP (tidak dikirim ke client):
- *      minDay, maxDay, timeType, durationDay, startDay — server-only
- *      cycleType (jika == actCycle) — redundant
- *      poolId (jika 0) — tidak ada pool
- *      endTime (jika 0) — tidak ada deadline
- *      hangupReward (jika null) — tidak ada drop
- *      haveExReward (jika bukan actType=1001) — tidak relevan
+ *  STRIPPED (server-only, tidak dikirim):
+ *    minDay, maxDay, timeType, durationDay, startDay
  *
  *  ═══════════════════════════════════════════════════════
  *  endTime COMPUTATION:
  *
- *    Berdasarkan getActivityDetail HAR data, aktivitas punya:
- *      _timeType:    1 = fixed timestamps, 2 = relative/user-based
- *      _startTime:   absolute ms (timeType=1) atau 0 (timeType=2)
- *      _endTime:     absolute ms (timeType=1) atau 0 (timeType=2)
- *      _startDay:    offset from server open (days)
- *      _durationDay: duration in days
+ *    Formula (timeType=1, REGRESSION only):
+ *      endTime = serverOpenDate + (startDay + durationDay) * 86400000 - 1
  *
- *    Untuk getActivityBrief, endTime HANYA dipakai oleh client untuk
- *    REGRESSION countdown (regressActEndtime). Aktivitas lain tidak
- *    perlu endTime di brief — timing detail ada di getActivityDetail.
- *
- *    Formula (timeType=1):
- *      endTime = serverOpenDate + (startDay + durationDay) * 86400000
- *
- *    Contoh dari HAR:
- *      serverOpenDate = 1775199600000 (approx)
- *      startDay=0, durationDay=7
- *      endTime = 1775199600000 + 7 * 86400000 = 1775804400000
- *      HAR _endTime = 1775804399999 (1ms off = day boundary at midnight)
- *
- *  ═══════════════════════════════════════════════════════
- *  VERIFIKASI: Response harus identik dengan HAR untuk 12 aktivitas
- *  saat ini (tanpa cycleType, poolId, endTime karena tidak relevan).
- *  Ketika aktivitas REGRESSION/FB/iOS ditambahkan, field otomatis
- *  muncul sesuai kebutuhan client.
+ *    -1ms untuk match HAR boundary: 1775804399999 bukan 1775804400000
+ *    Non-REGRESSION activities: endTime tidak relevan di brief
+ *    (detail timing ada di getActivityDetail response)
  * =====================================================
  */
 
 var RH = require('../../../../shared/responseHelper');
 var logger = require('../../../../shared/utils/logger');
-var activityConfig = require('../_config');
+var GameData = require('../../../../shared/gameData/loader');
 var ActivityManager = require('../../../activity');
 
-// ── Server-only fields — selalu di-strip dari response ──
-var SERVER_ONLY_FIELDS = ['minDay', 'maxDay', 'timeType', 'durationDay', 'startDay'];
-
-// ── Milliseconds per day — untuk endTime computation ──
-var MS_PER_DAY = 24 * 60 * 60 * 1000;
+// ── Milliseconds per day ──
+var MS_PER_DAY = 86400000;
 
 /**
- * Compute endTime for an activity based on its schedule config.
+ * Compute endTime for a REGRESSION activity (actCycle=17).
  *
- * endTime hanya dikirim untuk REGRESSION activities (actCycle=17)
- * karena client hanya memakainya untuk regressActEndtime countdown.
- * Aktivitas lain mendapat timing dari getActivityDetail.
+ * Client reads r.endTime di setActs (line 234743):
+ *   r.endTime && (e.regressActEndtime = r.endTime, e.setTimeLimitBags())
  *
- * Formula (timeType=1):
- *   endTime = serverOpenDate + (startDay + durationDay) * 86400000 - 1
- *   (subtract 1ms to match HAR boundary: 1775804399999 instead of 1775804400000)
+ * Hanya REGRESSION yang pakai endTime di brief untuk countdown.
+ * Activity lain mendapat timing dari getActivityDetail.
  *
- * timeType=2 (relative/user-based): tidak ada endTime
- *
- * @param {Object} act - Activity config entry (deep cloned)
+ * @param {Object} def - Activity definition dari activityDefine.json
  * @param {number} serverOpenDate - Server open timestamp (ms)
- * @returns {number} endTime in ms, or 0 if not applicable
+ * @returns {number} endTime in ms, atau 0 jika tidak applicable
  */
-function computeEndTime(act, serverOpenDate) {
-    // Hanya timeType=1 yang punya fixed endTime
-    if (act.timeType !== 1) {
+function computeEndTime(def, serverOpenDate) {
+    // Hanya timeType=1 (fixed) yang punya endTime
+    if (def.timeType !== 1) {
         return 0;
     }
 
     // Hanya REGRESSION (actCycle=17) yang butuh endTime di brief
-    // Client code: r.endTime && (e.regressActEndtime = r.endTime, e.setTimeLimitBags())
-    // Variabel regressActEndtime hanya dipakai untuk REGRESSION countdown
-    if (act.actCycle !== activityConfig.ACTIVITY_CYCLE.REGRESSION) {
+    if (def.actCycle !== 17) {
         return 0;
     }
 
-    if (!serverOpenDate || !act.durationDay) {
+    if (!serverOpenDate || !def.durationDay) {
         return 0;
     }
 
-    var startDay = act.startDay || 0;
-    var durationDay = act.durationDay;
-
-    // endTime = serverOpenDate + (startDay + durationDay) days - 1ms
-    // -1ms agar sesuai HAR: 1775804399999 bukan 1775804400000
-    var endTime = serverOpenDate + (startDay + durationDay) * MS_PER_DAY - 1;
-
-    return endTime;
+    var startDay = def.startDay || 0;
+    return serverOpenDate + (startDay + def.durationDay) * MS_PER_DAY - 1;
 }
 
 /**
- * Build filtered _acts map from activity config.
+ * Build filtered _acts map dari activityDefine (GameData).
  *
- * Proses:
- *   1. Iterasi ACTIVITY_BRIEF_LIST
- *   2. Filter berdasarkan openServerDays (minDay/maxDay)
- *   3. Deep clone setiap entry yang lolos filter
- *   4. Compute endTime dinamis (hanya REGRESSION)
- *   5. Strip server-only fields dari clone
- *   6. Strip conditional fields jika tidak relevan:
- *      - cycleType jika == actCycle (redundan, client baca r.cycleType
- *        hanya untuk FB/iOS yang cycleType-nya beda dari actCycle)
- *      - poolId jika 0 (tidak ada pool)
- *      - endTime jika 0 (tidak ada deadline)
- *      - hangupReward jika null/undefined
- *      - haveExReward jika bukan actType=1001
- *   7. Return sebagai map { [id]: activityObj }
+ * Alur natural:
+ *   activityDefine.json → GameData.get('activityDefine') → filter → strip → _acts
  *
- * @returns {Object} Filtered _acts map keyed by activity UUID
+ * Tidak ada:
+ *   - hardcoded activity list
+ *   - dummy data
+ *   - forced overrides
+ *   - bypass logic
+ *
+ * @returns {Object} _acts map { [id]: activityObj }
  */
 function buildFilteredActsMap() {
-    var list = activityConfig.ACTIVITY_BRIEF_LIST;
+    var activityDefine = GameData.get('activityDefine');
+
+    if (!activityDefine || !Array.isArray(activityDefine) || activityDefine.length === 0) {
+        logger.warn('ACTIVITY',
+            'getActivityBrief: activityDefine kosong atau tidak dimuat.' +
+            ' Pastikan resource/json/activityDefine.json ada dan valid.');
+        return {};
+    }
+
     var actsMap = {};
     var serverOpenDate = ActivityManager.getServerOpenDate();
+    var totalInConfig = activityDefine.length;
 
-    for (var i = 0; i < list.length; i++) {
-        var act = list[i];
+    for (var i = 0; i < activityDefine.length; i++) {
+        var def = activityDefine[i];
 
-        // ── Filter: cek apakah aktivitas masih dalam range hari ──
-        if (!ActivityManager.isActivityAvailableByDay(act)) {
+        // Skip entry tanpa id
+        if (!def.id) {
             continue;
         }
 
-        // ── Deep clone: mencegah mutasi config ──
-        var entry = JSON.parse(JSON.stringify(act));
+        // ── Filter: cek range hari ──
+        if (!ActivityManager.isActivityAvailableByDay(def)) {
+            continue;
+        }
 
-        // ── Compute endTime dinamis ──
-        // Hanya untuk REGRESSION (actCycle=17) dengan timeType=1
-        var endTime = computeEndTime(entry, serverOpenDate);
+        // ── Build entry: hanya field yang client butuhkan ──
+        var entry = {};
+
+        // Base fields (selalu dikirim — verified HAR)
+        entry.id = def.id;
+        if (def.templateName != null) entry.templateName = def.templateName;
+        if (def.name != null) entry.name = def.name;
+        if (def.icon != null) entry.icon = def.icon;
+        if (def.displayIndex != null) entry.displayIndex = def.displayIndex;
+        if (def.showRed != null) entry.showRed = def.showRed;
+        if (def.actCycle != null) entry.actCycle = def.actCycle;
+        if (def.actType != null) entry.actType = def.actType;
+
+        // ── Conditional fields: hanya ketika bermakna ──
+
+        // cycleType: client baca di checkLikeIsOn (line 234743)
+        // Hanya dikirim jika != actCycle (FB/iOS activities yang cycle berbeda)
+        // Untuk aktivitas standar: cycleType == actCycle → redundant, tidak ada di HAR
+        if (def.cycleType != null && def.cycleType !== def.actCycle) {
+            entry.cycleType = def.cycleType;
+        }
+
+        // poolId: client baca di setActivityList (line 155530)
+        // dan getActivityDetail request (line 168191)
+        // Hanya pool-based activities yang punya poolId > 0
+        // poolId=0 tidak ada di HAR response → strip
+        if (def.poolId != null && def.poolId > 0) {
+            entry.poolId = def.poolId;
+        }
+
+        // haveExReward: client baca di setActs (line 234743)
+        // Hanya relevan untuk actType=1001 (LOGIN)
+        // Client cek _exRewards dari getActivityDetail untuk regression check
+        // tapi field ini ada di HAR brief untuk LOGIN → keep
+        if (def.actType === 1001 && def.haveExReward != null) {
+            entry.haveExReward = def.haveExReward;
+        }
+
+        // hangupReward: client baca di setActs (line 234743)
+        // Hanya untuk actType=100 (ITEM_DROP)
+        if (def.actType === 100 && def.hangupReward != null) {
+            entry.hangupReward = def.hangupReward;
+        }
+
+        // endTime: client baca di setActs (line 234743)
+        // Hanya REGRESSION (actCycle=17) yang pakai untuk countdown
+        var endTime = computeEndTime(def, serverOpenDate);
         if (endTime > 0) {
             entry.endTime = endTime;
         }
 
-        // ── Strip server-only fields ──
-        for (var j = 0; j < SERVER_ONLY_FIELDS.length; j++) {
-            delete entry[SERVER_ONLY_FIELDS[j]];
-        }
-
-        // ── Strip cycleType jika sama dengan actCycle ──
-        // Client membaca r.cycleType hanya untuk:
-        //   1. checkLikeIsOn(id, actType, cycleType, poolId) — FB/iOS activities
-        //      di mana cycleType mungkin berbeda dari actCycle
-        //   2. getActivityDetail request — cycleType sebagai parameter
-        // Untuk aktivitas standar, cycleType == actCycle, jadi redundant
-        // dan TIDAK ADA di HAR response → strip untuk match HAR
-        if (entry.cycleType === entry.actCycle) {
-            delete entry.cycleType;
-        }
-
-        // ── Strip poolId jika 0 ──
-        // Client membaca r.poolId untuk:
-        //   1. setActivityList → poolId: t[o].poolId (line 103411)
-        //   2. getActivityDetail request → poolId parameter (line 168191)
-        // Hanya pool-based activities (gacha, etc.) yang punya poolId > 0
-        // poolId=0 TIDAK ADA di HAR response → strip untuk match HAR
-        if (!entry.poolId) {
-            delete entry.poolId;
-        }
-
-        // ── Strip endTime jika 0/falsy ──
-        // Hanya REGRESSION activities yang punya endTime di brief
-        if (!entry.endTime) {
-            delete entry.endTime;
-        }
-
-        // ── Strip hangupReward jika null/undefined ──
-        // Hanya actType=100 (ITEM_DROP) yang butuh field ini
-        if (entry.hangupReward == null) {
-            delete entry.hangupReward;
-        }
-
-        // ── Strip haveExReward jika bukan actType=1001 (LOGIN) ──
-        // Client mengecek _exRewards dari getActivityDetail (line 96464),
-        // bukan haveExReward dari brief. Tapi field ini ada di HAR
-        // untuk actType=1001 → keep hanya untuk LOGIN type.
-        if (entry.actType !== activityConfig.ACTIVITY_TYPE.LOGIN) {
-            delete entry.haveExReward;
-        }
-
         actsMap[entry.id] = entry;
     }
+
+    var filteredCount = Object.keys(actsMap).length;
+    logger.info('ACTIVITY',
+        'getActivityBrief: filtered ' + filteredCount + '/' + totalInConfig +
+        ' activities (openServerDays=' + ActivityManager.getOpenServerDays() + ')');
 
     return actsMap;
 }
@@ -267,25 +241,16 @@ function buildFilteredActsMap() {
  *
  * @param {Object} socket - Socket.IO socket instance
  * @param {Object} parsed - Parsed request dari client
- *   @param {string} parsed.type - "activity"
- *   @param {string} parsed.action - "getActivityBrief"
- *   @param {string} parsed.userId - User UUID
- *   @param {string} parsed.version - Protocol version (always "1.0")
  * @param {function} callback - Socket.IO acknowledgment callback
  */
 function handle(socket, parsed, callback) {
     var userId = parsed.userId;
     var openDays = ActivityManager.getOpenServerDays();
 
-    logger.info('ACTIVITY', 'getActivityBrief userId=' + userId +
-        ' openServerDays=' + openDays);
+    logger.info('ACTIVITY',
+        'getActivityBrief userId=' + userId + ' openServerDays=' + openDays);
 
-    // Build filtered _acts map
     var actsData = buildFilteredActsMap();
-
-    var actCount = Object.keys(actsData).length;
-    logger.info('ACTIVITY', 'getActivityBrief returning ' + actCount +
-        ' activities (filtered from ' + activityConfig.ACTIVITY_BRIEF_LIST.length + ')');
 
     callback(RH.success({
         type: parsed.type || 'activity',
