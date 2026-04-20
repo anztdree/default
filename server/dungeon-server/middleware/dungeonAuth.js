@@ -56,7 +56,7 @@ function setupVerification(socket, teaKey) {
                     ret: code,
                     compress: false,
                     serverTime: Date.now(),
-                    server0Time: Date.now(),
+                    server0Time: RH.SERVER_UTC_OFFSET_MS,
                 });
             }
         }
