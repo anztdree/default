@@ -1,11 +1,12 @@
 {
   "name": "swz-sdk-server",
-  "version": "3.0.0",
+  "version": "3.1.0",
   "description": "Super Warrior Z — PPGAME SDK Server (Port 9999)",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "node index.js --dev"
+    "dev": "node index.js --dev",
+    "test": "node test.js"
   },
   "engines": {
     "node": ">=14.0.0"
@@ -14,6 +15,17 @@
     "cors": "^2.8.5",
     "express": "^4.18.2"
   },
-  "keywords": ["super-warrior-z", "sdk-server", "ppgame"],
-  "license": "MIT"
+  "devDependencies": {},
+  "keywords": [
+    "super-warrior-z",
+    "sdk-server",
+    "ppgame",
+    "game"
+  ],
+  "license": "MIT",
+  "author": "",
+  "repository": {
+    "type": "git",
+    "url": ""
+  }
 }
