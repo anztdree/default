@@ -1,103 +1,149 @@
 /**
  * ============================================================================
- *  SDK Server v3 — Analytics Service
- *  ============================================================================
+ * SDK Server — Analytics Service (Natural Implementation)
+ * ============================================================================
  *
- *  Event logging & aggregation in data/analytics.json.
- *  Accepts events from both /api/report/* and /api/analytics/* endpoints.
- *  Normalizes different input formats into one standard format.
- *
- *  Fire-and-forget: endpoints ALWAYS return success to client.
- *  Analytics failure should never block gameplay.
+ * Event logging & aggregation in data/analytics.json
+ * 
+ * Natural approach:
+ * - Fire-and-forget endpoints (never block gameplay)
+ * - Normalize different input formats
+ * - Automatic rotation to prevent file bloat
  *
  * ============================================================================
  */
 
-var fs = require('fs');
-var path = require('path');
-var store = require('../storage/jsonStore');
-var CONSTANTS = require('../config/constants');
-var logger = require('../utils/logger');
+const fs = require('fs');
+const path = require('path');
+const store = require('../storage/jsonStore');
+const CONSTANTS = require('../config/constants');
+const logger = require('../utils/logger');
 
-var ANALYTICS_FILE = store.buildPath('analytics.json');
-var ARCHIVE_DIR = path.join(CONSTANTS.DATA_DIR, CONSTANTS.ANALYTICS_ARCHIVE_DIR);
+const ANALYTICS_FILE = store.buildPath('analytics.json');
+const ARCHIVE_DIR = path.join(CONSTANTS.DATA_DIR, CONSTANTS.ANALYTICS_ARCHIVE_DIR);
 
 // =============================================
 // DATA ACCESS
 // =============================================
 
+/**
+ * Load analytics data
+ * @returns {Object} Analytics data with events[] and meta{}
+ */
 function loadAnalytics() {
-    var data = store.load(ANALYTICS_FILE, {
+    const data = store.load(ANALYTICS_FILE, {
         events: [],
-        meta: { totalEvents: 0, lastFlush: '' }
+        meta: {
+            totalEvents: 0,
+            lastFlush: ''
+        }
     });
+    
     if (!data.events) data.events = [];
     if (!data.meta) data.meta = { totalEvents: 0, lastFlush: '' };
+    
     return data;
 }
 
+/**
+ * Save analytics data atomically
+ * @param {Object} data - Analytics data
+ * @returns {boolean} Success
+ */
 function saveAnalytics(data) {
     return store.save(ANALYTICS_FILE, data);
 }
 
 // =============================================
-// NORMALIZE & APPEND
+// NORMALIZE EVENT
 // =============================================
 
 /**
- * Normalize raw event to standard format.
+ * Normalize raw event to standard format
  * Handles 2 input formats:
- *   1. Analytics: { category, action, data, userId, ... }
- *   2. Report:    { category, eventType, eventData, userId, sessionId, ... }
+ * 1. Analytics: { category, action, data, userId, ... }
+ * 2. Report: { category, eventType, eventData, userId, sessionId, ... }
+ * 
+ * @param {Object} event - Raw event
+ * @returns {Object} Normalized event
  */
 function normalizeEvent(event) {
     return {
+        // IDs
         id: event.id || null,
-        category: event.category || 'unknown',
-        action: event.action || event.eventType || 'unknown',
-        data: event.data || event.eventData || {},
         userId: event.userId || null,
         sessionId: event.sessionId || null,
+        
+        // Character info
         serverId: event.serverId || null,
         serverName: event.serverName || null,
         characterId: event.characterId || null,
         characterName: event.characterName || null,
         characterLevel: event.characterLevel || null,
-        sdk: event.sdk || event.sdkChannel || 'unknown',
+        
+        // Categorization
+        category: event.category || 'unknown',
+        action: event.action || event.eventType || 'unknown',
+        
+        // Data
+        data: event.data || event.eventData || {},
+        
+        // SDK info
+        sdk: event.sdk || event.sdkChannel || null,
         appId: event.appId || null,
+        
+        // Context
         pageUrl: event.pageUrl || null,
+        
+        // Timestamps
         timestamp: event.timestamp || new Date().toISOString(),
         receivedAt: new Date().toISOString()
     };
 }
 
+// =============================================
+// APPEND EVENTS
+// =============================================
+
 /**
- * Append single event.
+ * Append single event (fire-and-forget)
+ * Always returns success to client
+ * 
+ * @param {Object} event - Event data
  */
 function appendEvent(event) {
     try {
-        var data = loadAnalytics();
+        const data = loadAnalytics();
+        
         data.events.push(normalizeEvent(event));
         data.meta.totalEvents = (data.meta.totalEvents || 0) + 1;
         data.meta.lastFlush = new Date().toISOString();
+        
         saveAnalytics(data);
-    } catch (e) {
-        logger.error('Analytics', 'appendEvent failed: ' + e.message);
+    } catch (error) {
+        // Never fail - fire-and-forget
+        logger.error('Analytics', `appendEvent failed: ${error.message}`);
     }
 }
 
 /**
- * Append multiple events (batch).
- * @returns {number} Count appended
+ * Append multiple events (batch)
+ * 
+ * @param {Object[]} events - Array of events
+ * @returns {number} Count appended (0 if failed)
  */
 function appendEvents(events) {
-    if (!Array.isArray(events) || events.length === 0) return 0;
+    if (!Array.isArray(events) || events.length === 0) {
+        return 0;
+    }
 
     try {
-        var data = loadAnalytics();
-        for (var i = 0; i < events.length; i++) {
-            data.events.push(normalizeEvent(events[i]));
+        const data = loadAnalytics();
+        
+        for (const event of events) {
+            data.events.push(normalizeEvent(event));
         }
+        
         data.meta.totalEvents = (data.meta.totalEvents || 0) + events.length;
         data.meta.lastFlush = new Date().toISOString();
 
@@ -105,8 +151,8 @@ function appendEvents(events) {
             return events.length;
         }
         return 0;
-    } catch (e) {
-        logger.error('Analytics', 'appendEvents failed: ' + e.message);
+    } catch (error) {
+        logger.error('Analytics', `appendEvents failed: ${error.message}`);
         return 0;
     }
 }
@@ -116,33 +162,46 @@ function appendEvents(events) {
 // =============================================
 
 /**
- * Get analytics dashboard summary.
- * @param {string} [category] - Optional filter
- * @param {number} [limit] - Max recent events (default 50)
+ * Get analytics dashboard summary
+ * 
+ * @param {string} category - Optional filter
+ * @param {number} limit - Max recent events (default 50)
+ * @returns {Object} Dashboard data
  */
-function getDashboard(category, limit) {
-    var data = loadAnalytics();
-    var events = data.events || [];
+function getDashboard(category = null, limit = 50) {
+    const data = loadAnalytics();
+    let events = data.events || [];
 
+    // Filter by category if specified
     if (category) {
-        events = events.filter(function (e) { return e.category === category; });
+        events = events.filter(e => e.category === category);
     }
 
-    var categoryStats = {};
-    for (var i = 0; i < events.length; i++) {
-        var cat = events[i].category;
-        if (!categoryStats[cat]) categoryStats[cat] = { count: 0, actions: {} };
+    // Calculate stats
+    const categoryStats = {};
+    
+    for (const event of events) {
+        const cat = event.category || 'unknown';
+        if (!categoryStats[cat]) {
+            categoryStats[cat] = { count: 0, actions: {} };
+        }
         categoryStats[cat].count++;
-        var action = events[i].action;
-        if (!categoryStats[cat].actions[action]) categoryStats[cat].actions[action] = 0;
+        
+        const action = event.action || 'unknown';
+        if (!categoryStats[cat].actions[action]) {
+            categoryStats[cat].actions[action] = 0;
+        }
         categoryStats[cat].actions[action]++;
     }
+
+    // Get recent events (last 'limit' events)
+    const recentEvents = events.slice(-(limit || 50));
 
     return {
         meta: data.meta,
         totalEvents: events.length,
-        categoryStats: categoryStats,
-        recentEvents: events.slice(-(limit || 50))
+        categoryStats,
+        recentEvents
     };
 }
 
@@ -151,56 +210,129 @@ function getDashboard(category, limit) {
 // =============================================
 
 /**
- * Archive 80% oldest events when > MAX_ANALYTICS_EVENTS.
+ * Archive oldest events when exceeding MAX_ANALYTICS_EVENTS
+ * Archives ANALYTICS_ARCHIVE_PERCENT (80%) of oldest events
  */
 function rotateIfNeeded() {
     try {
-        var data = loadAnalytics();
-        var events = data.events || [];
+        const data = loadAnalytics();
+        const events = data.events || [];
 
-        if (events.length <= CONSTANTS.MAX_ANALYTICS_EVENTS) return;
+        // Check if rotation needed
+        if (events.length <= CONSTANTS.MAX_ANALYTICS_EVENTS) {
+            return;
+        }
 
+        // Ensure archive directory exists
         if (!fs.existsSync(ARCHIVE_DIR)) {
             fs.mkdirSync(ARCHIVE_DIR, { recursive: true });
         }
 
-        var archiveCount = Math.floor(events.length * CONSTANTS.ANALYTICS_ARCHIVE_PERCENT);
-        var archived = events.splice(0, archiveCount);
+        // Calculate how many to archive
+        const archiveCount = Math.floor(events.length * CONSTANTS.ANALYTICS_ARCHIVE_PERCENT);
+        const archived = events.splice(0, archiveCount);
 
-        var archiveFile = path.join(
-            ARCHIVE_DIR,
-            'analytics_' + new Date().toISOString().replace(/[:.]/g, '-') + '.json'
-        );
+        // Generate archive filename
+        const timestamp = new Date().toISOString()
+            .replace(/[:.]/g, '-')
+            .replace('T', '_')
+            .substring(0, 19);
+        
+        const archiveFile = path.join(ARCHIVE_DIR, `analytics_${timestamp}.json`);
 
+        // Save archive
         store.save(archiveFile, {
             archivedAt: new Date().toISOString(),
             eventCount: archived.length,
             events: archived
         });
 
+        // Save remaining events
         data.events = events;
         saveAnalytics(data);
 
-        logger.info('Analytics', 'Rotated ' + archiveCount + ' events (remaining: ' + events.length + ')');
-    } catch (e) {
-        logger.error('Analytics', 'Rotation error: ' + e.message);
+        logger.info('Analytics', `Rotated ${archiveCount} events (remaining: ${events.length})`);
+    } catch (error) {
+        logger.error('Analytics', `Rotation error: ${error.message}`);
     }
 }
 
+/**
+ * Start periodic rotation
+ * @returns {Interval} Timer reference
+ */
 function startRotationInterval() {
-    return setInterval(rotateIfNeeded, CONSTANTS.ANALYTICS_ROTATION_INTERVAL_MS);
+    return setInterval(() => {
+        rotateIfNeeded();
+    }, CONSTANTS.ANALYTICS_ROTATION_INTERVAL_MS);
 }
 
+// =============================================
+// STATS
+// =============================================
+
+/**
+ * Get total event count
+ * @returns {number} Total events
+ */
 function getTotalEventCount() {
-    var data = loadAnalytics();
+    const data = loadAnalytics();
     return data.meta ? data.meta.totalEvents || 0 : 0;
 }
 
+/**
+ * Get full stats
+ * @returns {Object} Analytics statistics
+ */
+function getStats() {
+    const data = loadAnalytics();
+    const events = data.events || [];
+
+    const stats = {
+        totalEvents: data.meta?.totalEvents || 0,
+        currentEvents: events.length,
+        lastFlush: data.meta?.lastFlush || null,
+        categories: {}
+    };
+
+    for (const event of events) {
+        const cat = event.category || 'unknown';
+        if (!stats.categories[cat]) {
+            stats.categories[cat] = 0;
+        }
+        stats.categories[cat]++;
+    }
+
+    // Archive stats
+    let archiveCount = 0;
+    let archiveFiles = [];
+    
+    if (fs.existsSync(ARCHIVE_DIR)) {
+        const files = fs.readdirSync(ARCHIVE_DIR);
+        for (const file of files) {
+            if (file.startsWith('analytics_') && file.endsWith('.json')) {
+                archiveCount++;
+                archiveFiles.push(file);
+            }
+        }
+    }
+
+    stats.archiveFiles = archiveCount;
+    stats.archiveList = archiveFiles.slice(-10); // Last 10
+
+    return stats;
+}
+
+// =============================================
+// EXPORT
+// =============================================
+
 module.exports = {
-    appendEvent: appendEvent,
-    appendEvents: appendEvents,
-    getDashboard: getDashboard,
-    rotateIfNeeded: rotateIfNeeded,
-    startRotationInterval: startRotationInterval,
-    getTotalEventCount: getTotalEventCount
+    appendEvent,
+    appendEvents,
+    getDashboard,
+    rotateIfNeeded,
+    startRotationInterval,
+    getTotalEventCount,
+    getStats
 };
