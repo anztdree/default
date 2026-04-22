@@ -1,26 +1,17 @@
 /**
  * ============================================================================
- * Hangup Handler — Main Server
+ * MonthCard Handler — Main Server
  * ============================================================================
- * Actions: buyLessonFund, checkBattleResult, clickSystem, gain, getChapterReward, getFundReward, getLessonFundReward, getOnlineGift, nextChapter, saveGuideTeam, startGeneral, summonEnergy
+ * Actions: buyCard, getFrisetRechargeReward, getReward
  */
 
 var ResponseHelper = require('../core/responseHelper');
 var logger = require('../utils/logger');
 
 var actions = {
-  buyLessonFund: null,
-  checkBattleResult: null,
-  clickSystem: null,
-  gain: null,
-  getChapterReward: null,
-  getFundReward: null,
-  getLessonFundReward: null,
-  getOnlineGift: null,
-  nextChapter: null,
-  saveGuideTeam: null,
-  startGeneral: null,
-  summonEnergy: null,
+  buyCard: null,
+  getFrisetRechargeReward: null,
+  getReward: null,
 };
 
 function handle(socket, request, callback) {
@@ -37,7 +28,7 @@ function handle(socket, request, callback) {
   if (handler) {
     handler(socket, request, callback);
   } else {
-    logger.warn('Hangup', 'Unknown action: ' + action);
+    logger.warn('MonthCard', 'Unknown action: ' + action);
     ResponseHelper.sendResponse(socket, 'handler.process',
       ResponseHelper.error(ResponseHelper.ErrorCode.INVALID_COMMAND), callback);
   }
