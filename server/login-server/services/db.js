@@ -1,26 +1,34 @@
 /**
+ * ============================================================================
  * Login Server — MariaDB Database Manager
+ * ============================================================================
  *
- * Two-phase init:
- *   Phase 1: Connect without database → CREATE DATABASE IF NOT EXISTS
- *   Phase 2: Connect with database → CREATE TABLE IF NOT EXISTS
+ * NATURAL IMPLEMENTATION:
+ * - Two-phase initialization
+ * - Auto-create database and tables
+ * - Connection pooling
  *
  * Tables: users, login_tokens, user_languages, _schema_meta
  *
- * NO shared/ dependency — fully standalone
+ * ============================================================================
  */
 
-var mariadb = require('mariadb');
-var CONSTANTS = require('../config/constants');
-var logger = require('../utils/logger');
+const mariadb = require('mariadb');
+const CONSTANTS = require('../config/constants');
+const logger = require('../utils/logger');
 
-var pool = null;
-var ready = false;
+let pool = null;
+let ready = false;
 
-// ================================================================
+// =============================================
 // INIT
-// ================================================================
+// =============================================
 
+/**
+ * Initialize database connection
+ * Phase 1: Connect without database → CREATE DATABASE IF NOT EXISTS
+ * Phase 2: Connect with database → CREATE TABLE IF NOT EXISTS
+ */
 async function init() {
     if (ready) {
         logger.info('DB', 'Already initialized');
@@ -28,49 +36,79 @@ async function init() {
     }
 
     try {
+        // Phase 1: Bootstrap database
         await _bootstrapDatabase();
+        
+        // Phase 2: Create tables
         await _createTables();
+        
         ready = true;
         logger.info('DB', 'Initialized successfully');
+
     } catch (err) {
         ready = false;
         pool = null;
-        logger.error('DB', 'Init failed: ' + err.message);
+        logger.error('DB', `Init failed: ${err.message}`);
         throw err;
     }
 }
 
-async function _bootstrapDatabase() {
-    var cfg = CONSTANTS.DB;
-    logger.info('DB', 'Phase 1: Connecting to MariaDB at ' + cfg.host + ':' + cfg.port + '...');
+// =============================================
+// BOOTSTRAP
+// =============================================
 
-    var tmpPool = mariadb.createPool({
+/**
+ * Create database if not exists
+ */
+async function _bootstrapDatabase() {
+    const cfg = CONSTANTS.DB;
+    logger.info('DB', `Phase 1: Connecting to MariaDB at ${cfg.host}:${cfg.port}...`);
+
+    // Create temp connection without database
+    const tmpPool = mariadb.createPool({
         host: cfg.host,
         port: cfg.port,
         user: cfg.user,
         password: cfg.password,
         connectionLimit: 1,
-        connectTimeout: 10000,
-        acquireTimeout: 10000,
+        connectTimeout: cfg.connectTimeout,
+        acquireTimeout: cfg.acquireTimeout
     });
 
-    var conn;
+    let conn;
     try {
         conn = await tmpPool.getConnection();
+        
+        // Create database
         await conn.query(
-            'CREATE DATABASE IF NOT EXISTS `' + cfg.database + '` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci'
+            `CREATE DATABASE IF NOT EXISTS \`${cfg.database}\` 
+             CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci`
         );
-        logger.info('DB', 'Database "' + cfg.database + '" verified');
+        
+        logger.info('DB', `Database "${cfg.database}" ready`);
+
     } finally {
         if (conn) conn.release();
-        try { await tmpPool.end(); } catch (e) { /* ignore */ }
+        try { 
+            await tmpPool.end(); 
+        } catch (e) { 
+            /* ignore */ 
+        }
     }
 }
 
+// =============================================
+// TABLES
+// =============================================
+
+/**
+ * Create all required tables
+ */
 async function _createTables() {
-    var cfg = CONSTANTS.DB;
+    const cfg = CONSTANTS.DB;
     logger.info('DB', 'Phase 2: Creating tables...');
 
+    // Create main pool with database
     pool = mariadb.createPool({
         host: cfg.host,
         port: cfg.port,
@@ -78,16 +116,20 @@ async function _createTables() {
         password: cfg.password,
         database: cfg.database,
         connectionLimit: cfg.connectionLimit,
-        connectTimeout: 10000,
-        acquireTimeout: 10000,
+        connectTimeout: cfg.connectTimeout,
+        acquireTimeout: cfg.acquireTimeout
     });
 
-    var conn;
+    let conn;
     try {
         conn = await pool.getConnection();
+        
+        // Test connection
         await conn.query('SELECT 1 AS test');
 
+        // =============================================
         // users table
+        // =============================================
         await conn.query(`
             CREATE TABLE IF NOT EXISTS users (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -107,9 +149,11 @@ async function _createTables() {
                 INDEX idx_user_id (user_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         `);
-        logger.info('DB', '  Table users OK');
+        logger.info('DB', 'Table users OK');
 
+        // =============================================
         // login_tokens table
+        // =============================================
         await conn.query(`
             CREATE TABLE IF NOT EXISTS login_tokens (
                 id INT AUTO_INCREMENT PRIMARY KEY,
@@ -123,9 +167,11 @@ async function _createTables() {
                 INDEX idx_user_id (user_id)
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         `);
-        logger.info('DB', '  Table login_tokens OK');
+        logger.info('DB', 'Table login_tokens OK');
 
+        // =============================================
         // user_languages table
+        // =============================================
         await conn.query(`
             CREATE TABLE IF NOT EXISTS user_languages (
                 user_id VARCHAR(64) PRIMARY KEY,
@@ -135,9 +181,11 @@ async function _createTables() {
                 updated_at BIGINT DEFAULT 0
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         `);
-        logger.info('DB', '  Table user_languages OK');
+        logger.info('DB', 'Table user_languages OK');
 
+        // =============================================
         // _schema_meta table
+        // =============================================
         await conn.query(`
             CREATE TABLE IF NOT EXISTS _schema_meta (
                 key_name VARCHAR(64) NOT NULL PRIMARY KEY,
@@ -146,104 +194,135 @@ async function _createTables() {
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
         `);
 
-        await conn.query(
-            'INSERT INTO _schema_meta (key_name, key_value, updated_at) VALUES (?, ?, ?) ' +
-            'ON DUPLICATE KEY UPDATE key_value = ?, updated_at = ?',
-            ['schema_version', '1', Date.now(), '1', Date.now()]
-        );
-        logger.info('DB', '  Table _schema_meta OK');
+        // Insert schema version
+        await conn.query(`
+            INSERT INTO _schema_meta (key_name, key_value, updated_at) 
+            VALUES ('schema_version', '2.0', ?) 
+            ON DUPLICATE KEY UPDATE key_value = '2.0', updated_at = ?
+        `, [Date.now(), Date.now()]);
 
         logger.info('DB', 'All tables created');
+
     } finally {
         if (conn) conn.release();
     }
 }
 
-// ================================================================
+// =============================================
 // QUERY
-// ================================================================
+// =============================================
 
-async function query(sql, params) {
+/**
+ * Execute query
+ * @param {string} sql - SQL query
+ * @param {Array} params - Query parameters
+ * @returns {Promise<Array>} Query results
+ */
+async function query(sql, params = []) {
     if (!pool || !ready) {
         throw new Error('Database not initialized');
     }
 
-    var conn;
+    let conn;
     try {
         conn = await pool.getConnection();
         return await conn.query(sql, params);
     } catch (err) {
-        logger.error('DB', 'Query error: ' + err.message);
-        logger.error('DB', '  SQL: ' + sql);
+        logger.error('DB', `Query error: ${err.message}`);
+        logger.error('DB', `SQL: ${sql}`);
         throw err;
     } finally {
         if (conn) conn.release();
     }
 }
 
-async function queryOne(sql, params) {
-    var rows = await query(sql, params);
+/**
+ * Execute query, return single row
+ * @param {string} sql - SQL query
+ * @param {Array} params - Query parameters
+ * @returns {Promise<Object|null>} Single row or null
+ */
+async function queryOne(sql, params = []) {
+    const rows = await query(sql, params);
     return (rows && rows.length > 0) ? rows[0] : null;
 }
 
-// ================================================================
+// =============================================
 // HEALTH
-// ================================================================
+// =============================================
 
-function isReady() { return ready; }
+/**
+ * Check if database is ready
+ * @returns {boolean}
+ */
+function isReady() {
+    return ready;
+}
 
-// ================================================================
+// =============================================
 // CLOSE
-// ================================================================
+// =============================================
 
+/**
+ * Close database pool
+ */
 async function close() {
-    if (!pool) { ready = false; return; }
+    if (!pool) { 
+        ready = false; 
+        return; 
+    }
+    
     logger.info('DB', 'Closing pool...');
     ready = false;
+    
     try {
         await pool.end();
         pool = null;
         logger.info('DB', 'Pool closed');
     } catch (err) {
-        logger.error('DB', 'Close error: ' + err.message);
+        logger.error('DB', `Close error: ${err.message}`);
         pool = null;
     }
 }
 
-// ================================================================
-// TOKEN CLEANUP (every 1 hour)
-// ================================================================
+// =============================================
+// TOKEN CLEANUP (Periodic)
+// =============================================
 
-var _cleanupInterval = setInterval(async function () {
+let _cleanupInterval = setInterval(async function() {
     if (!pool || !ready) return;
+    
     try {
-        var cutoff = Date.now() - 86400000;
-        var r = await pool.query(
+        const cutoff = Date.now() - 86400000; // 24 hours
+        const result = await pool.query(
             'DELETE FROM login_tokens WHERE expires_at < ? OR (used = 1 AND created_at < ?)',
             [cutoff, cutoff]
         );
-        if (r && r.affectedRows > 0) {
-            logger.info('DB', 'Token cleanup: removed ' + r.affectedRows + ' rows');
+        
+        if (result && result.affectedRows > 0) {
+            logger.info('DB', `Token cleanup: removed ${result.affectedRows} rows`);
         }
     } catch (e) {
-        logger.warn('DB', 'Token cleanup error: ' + e.message);
+        logger.warn('DB', `Token cleanup error: ${e.message}`);
     }
-}, 3600000);
+}, 3600000); // Every 1 hour
 
-// Process cleanup
-process.on('exit', function () {
-    if (pool) { try { pool.end(); } catch (e) { /* ignore */ } }
+// Cleanup on exit
+process.on('exit', function() {
+    if (pool) { 
+        try { pool.end(); } catch (e) { /* ignore */ } 
+    }
     clearInterval(_cleanupInterval);
 });
 
-// ================================================================
+// =============================================
 // EXPORTS
-// ================================================================
+// =============================================
 
 module.exports = {
-    init: init,
-    query: query,
-    queryOne: queryOne,
-    isReady: isReady,
-    close: close,
+    init,
+    query,
+    queryOne,
+    isReady,
+    close
 };
