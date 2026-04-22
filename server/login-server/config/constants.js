@@ -63,7 +63,7 @@ const CLIENT_VERSION = '1.0';
 // For correct server time: server0Time = -(server_tz_offset_ms)
 // UTC+7 (Jakarta) =  25200000
 // UTC+8 (Singapore) =  28800000
-const SERVER_UTC_OFFSET_MS = parseInt(process.env.SERVER_UTC_OFFSET_MS) || -25200000;
+const SERVER_UTC_OFFSET_MS = parseInt(process.env.SERVER_UTC_OFFSET_MS) ||  25200000;
 
 // =============================================
 // SERVER LIST — sent to client via GetServerList
