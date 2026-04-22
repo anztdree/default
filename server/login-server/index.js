@@ -1,32 +1,36 @@
 /**
  * ============================================================================
- * Login Server — Entry Point (Natural Implementation v2.0)
+ * Login Server — Entry Point  [FIXED v2.1]
  * Port 8000 — Socket.IO v2, NO TEA encryption
  * ============================================================================
  *
- * NATURAL IMPLEMENTATION:
- * - Removed monkey-patch writeHead for CORS
- * - Using Socket.IO built-in CORS configuration
- * - Clean, maintainable code
+ * FIXES in v2.1:
+ *   - responseHelper.js: "compress is not a function" → renamed internal
+ *     compression function to _lzCompress so it doesn't shadow the
+ *     local boolean variable 'compress' / 'shouldCompress'.
+ *   - All handlers: added errorCode:0 to responses (HAR-verified).
+ *   - saveHistory: daily count now DB-backed (not in-memory).
+ *   - loginAnnounce: response now { data:[], errorCode:0 }.
+ *   - getServerList, saveLanguage, saveUserEnterInfo: forceCompress=false.
  *
  * ============================================================================
  */
 
-const http = require('http');
+const http    = require('http');
 const express = require('express');
 const socketIo = require('socket.io');
 
 const CONSTANTS = require('./config/constants');
 const { success, error, ErrorCode } = require('./utils/responseHelper');
 const logger = require('./utils/logger');
-const DB = require('./services/db');
+const DB     = require('./services/db');
 
 // Handlers
-const { loginGame } = require('./handlers/loginGame');
-const { getServerList } = require('./handlers/getServerList');
-const { saveHistory } = require('./handlers/saveHistory');
-const { loginAnnounce } = require('./handlers/loginAnnounce');
-const { saveLanguage } = require('./handlers/saveLanguage');
+const { loginGame }        = require('./handlers/loginGame');
+const { getServerList }    = require('./handlers/getServerList');
+const { saveHistory }      = require('./handlers/saveHistory');
+const { loginAnnounce }    = require('./handlers/loginAnnounce');
+const { saveLanguage }     = require('./handlers/saveLanguage');
 const { saveUserEnterInfo } = require('./handlers/saveUserEnterInfo');
 
 // Rate Limiter
@@ -38,35 +42,34 @@ const RateLimiter = require('./middleware/rateLimiter');
 
 const app = express();
 
-// CORS Middleware for non-Socket.IO routes (like /health)
+// CORS Middleware for non-Socket.IO routes (e.g. /health)
 app.use((req, res, next) => {
-    const origin = req.headers.origin || '*';
-    res.setHeader('Access-Control-Allow-Origin', origin);
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
-    res.setHeader('Access-Control-Allow-Credentials', 'true');
-    res.setHeader('Access-Control-Max-Age', '86400');
+  const origin = req.headers.origin || '*';
+  res.setHeader('Access-Control-Allow-Origin', origin);
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Credentials', 'true');
+  res.setHeader('Access-Control-Max-Age', '86400');
 
-    if (req.method === 'OPTIONS') {
-        return res.sendStatus(200);
-    }
+  if (req.method === 'OPTIONS') {
+    return res.sendStatus(200);
+  }
 
-    next();
+  next();
 });
 
 // Health endpoint
 app.get('/health', (req, res) => {
-    res.json({
-        status: 'ok',
-        service: 'login-server',
-        version: '2.0.0',
-        port: CONSTANTS.PORT,
-        host: CONSTANTS.HOST,
-        dbReady: DB.isReady(),
-        uptime: process.uptime(),
-        corsFix: 'natural-socket-io-cors',
-        timestamp: new Date().toISOString()
-    });
+  res.json({
+    status:   'ok',
+    service:  'login-server',
+    version:  '2.1.0',
+    port:     CONSTANTS.PORT,
+    host:     CONSTANTS.HOST,
+    dbReady:  DB.isReady(),
+    uptime:   process.uptime(),
+    timestamp: new Date().toISOString()
+  });
 });
 
 // =============================================
@@ -75,95 +78,75 @@ app.get('/health', (req, res) => {
 
 const server = http.createServer(app);
 
-/**
- * Socket.IO v2 CORS Configuration
- * 
- * Natural approach using built-in Socket.IO CORS handling.
- * No monkey-patch required.
- * 
- * For Socket.IO v2, the cors option is available.
- * If using older version, we set origins: '*' with handlePreflightRequest.
- */
-const ioOptions = {
-    // Serve client library - disabled for API-only server
-    serveClient: false,
+const io = socketIo(server, {
+  // Do NOT serve client library (API-only server)
+  serveClient: false,
 
-    // Transports - polling first matches client default
-    transports: ['polling', 'websocket'],
+  // Match client transports (polling first, then upgrade)
+  transports: ['polling', 'websocket'],
 
-    // Disable cookies to avoid CORS complexity
-    cookie: false,
+  // Disable cookies
+  cookie: false,
 
-    // Ping/pong timing
-    pingInterval: CONSTANTS.PING_INTERVAL || 25000,
-    pingTimeout: CONSTANTS.PING_TIMEOUT || 60000,
+  // Timing
+  pingInterval: CONSTANTS.PING_INTERVAL || 25000,
+  pingTimeout:  CONSTANTS.PING_TIMEOUT  || 60000,
 
-    // Allow transport upgrades
-    allowUpgrades: true,
-    upgradeTimeout: 30000,
+  // Allow upgrades
+  allowUpgrades:   true,
+  upgradeTimeout: 30000,
 
-    // CORS configuration for Socket.IO
-    // Using handlePreflightRequest for Engine.IO v3 compatibility
-    handlePreflightRequest: function(req, res) {
-        const origin = req.headers.origin || '*';
-        res.writeHead(200, {
-            'Access-Control-Allow-Origin': origin,
-            'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-            'Access-Control-Allow-Headers': 'Content-Type',
-            'Access-Control-Allow-Credentials': 'true',
-        });
-        res.end();
-    },
+  // Allow all origins (Socket.IO v2)
+  origins: '*',
 
-    // Allow all connections (auth happens in handlers)
-    allowRequest: function(req, callback) {
-        callback(null, true);
-    }
-};
+  // Preflight CORS handler (Engine.IO v3 compatible)
+  handlePreflightRequest: function(req, res) {
+    const origin = req.headers.origin || '*';
+    res.writeHead(200, {
+      'Access-Control-Allow-Origin':      origin,
+      'Access-Control-Allow-Methods':     'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers':     'Content-Type',
+      'Access-Control-Allow-Credentials': 'true'
+    });
+    res.end();
+  },
 
-// Apply CORS via origins configuration as backup
-// Socket.IO v2 uses 'origins' option
-try {
-    // Try newer Socket.IO v3/v4 style CORS first
-    if (typeof ioOptions.cors === 'undefined') {
-        // Set origins for Socket.IO v2
-        ioOptions.origins = '*';
-    }
-} catch (e) {
-    // Ignore - we'll use handlePreflightRequest as primary
-}
-
-const io = socketIo(server, ioOptions);
+  // Allow all connections (auth happens inside handlers)
+  allowRequest: function(req, callback) {
+    callback(null, true);
+  }
+});
 
 // =============================================
 // SOCKET.IO CONNECTION
 // =============================================
 
 io.on('connection', function(socket) {
-    const transport = socket.conn && socket.conn.transport ? socket.conn.transport.name : 'unknown';
-    logger.info('Socket', `Connected: ${socket.id} | transport=${transport}`);
+  const transport = socket.conn && socket.conn.transport
+    ? socket.conn.transport.name
+    : 'unknown';
 
-    // Log transport upgrades
-    if (socket.conn) {
-        socket.conn.on('upgrade', function(transport) {
-            logger.info('Socket', `Upgrade: ${socket.id} → ${transport.name}`);
-        });
-    }
+  logger.info('Socket', `Connected: ${socket.id} | transport=${transport}`);
 
-    // Handle incoming requests
-    socket.on('handler.process', function(payload, callback) {
-        handleProcess(socket, payload, callback);
+  // Log transport upgrades (polling → websocket)
+  if (socket.conn) {
+    socket.conn.on('upgrade', function(transport) {
+      logger.info('Socket', `Upgrade: ${socket.id} → ${transport.name}`);
     });
+  }
 
-    // Handle disconnect
-    socket.on('disconnect', function(reason) {
-        logger.info('Socket', `Disconnected: ${socket.id} | reason=${reason}`);
-    });
+  // Main request dispatcher
+  socket.on('handler.process', function(payload, callback) {
+    handleProcess(socket, payload, callback);
+  });
 
-    // Handle errors
-    socket.on('error', function(err) {
-        logger.error('Socket', `Error: ${socket.id} | ${err.message}`);
-    });
+  socket.on('disconnect', function(reason) {
+    logger.info('Socket', `Disconnected: ${socket.id} | reason=${reason}`);
+  });
+
+  socket.on('error', function(err) {
+    logger.error('Socket', `Error: ${socket.id} | ${err.message}`);
+  });
 });
 
 // =============================================
@@ -171,59 +154,60 @@ io.on('connection', function(socket) {
 // =============================================
 
 /**
- * Route handler.process → action handlers
- * 
- * Client sends: { type: "User", action: "loginGame", ... }
- * Server responds: { ret: 0, data: "JSON_STRING", compress: bool, serverTime, server0Time }
+ * Route handler.process events to action handlers
+ *
+ * Client sends:  { type: "User", action: "loginGame", ... }
+ * Server returns: { ret: 0, data: "JSON_STRING", compress: bool, serverTime, server0Time }
  */
 async function handleProcess(socket, payload, callback) {
-    const action = payload.action;
-    const userId = payload.userId || payload.accountToken || '-';
-    const clientIp = socket.handshake && socket.handshake.address 
-        ? socket.handshake.address 
-        : (socket.conn && socket.conn.remoteAddress);
+  const action   = payload && payload.action;
+  const userId   = (payload && (payload.userId || payload.accountToken)) || '-';
+  const clientIp = (socket.handshake && socket.handshake.address)
+    || (socket.conn && socket.conn.remoteAddress)
+    || '?';
 
-    logger.info('Request', `${action} | userId=${userId} | ip=${clientIp}`);
+  logger.info('Request', `${action} | userId=${userId} | ip=${clientIp}`);
 
-    try {
-        switch (action) {
-            case 'loginGame':
-                await loginGame(socket, payload, callback, clientIp);
-                break;
+  try {
+    switch (action) {
+      case 'loginGame':
+        await loginGame(socket, payload, callback, clientIp);
+        break;
 
-            case 'GetServerList':
-                getServerList(payload, callback);
-                break;
+      case 'GetServerList':
+        getServerList(payload, callback);
+        break;
 
-            case 'SaveHistory':
-                await saveHistory(payload, callback);
-                break;
+      case 'SaveHistory':
+        await saveHistory(payload, callback);
+        break;
 
-            case 'LoginAnnounce':
-                loginAnnounce(callback);
-                break;
+      case 'LoginAnnounce':
+        loginAnnounce(callback);
+        break;
 
-            case 'SaveLanguage':
-                await saveLanguage(payload, callback);
-                break;
+      case 'SaveLanguage':
+        await saveLanguage(payload, callback);
+        break;
 
-            case 'SaveUserEnterInfo':
-                saveUserEnterInfo(payload, callback);
-                break;
+      case 'SaveUserEnterInfo':
+        saveUserEnterInfo(payload, callback);
+        break;
 
-            default:
-                logger.warn('Request', `Unknown action: ${action}`);
-                if (callback) {
-                    callback(success({}));
-                }
-                break;
-        }
-    } catch (err) {
-        logger.error('Request', `Handler error (${action}): ${err.message}`);
+      default:
+        logger.warn('Request', `Unknown action: ${action}`);
         if (callback) {
-            callback(error(ErrorCode.UNKNOWN));
+          callback(success({ errorCode: 0 }));
         }
+        break;
     }
+
+  } catch (err) {
+    logger.error('Request', `Handler error (${action}): ${err.message}`);
+    if (callback) {
+      callback(error(ErrorCode.UNKNOWN));
+    }
+  }
 }
 
 // =============================================
@@ -231,31 +215,32 @@ async function handleProcess(socket, payload, callback) {
 // =============================================
 
 function gracefulShutdown(signal) {
-    logger.info('Shutdown', `${signal} received...`);
+  logger.info('Shutdown', `${signal} received...`);
 
-    io.close();
-    server.close(function() {
-        DB.close().then(function() {
-            logger.info('Shutdown', 'Done');
-            process.exit(0);
-        }).catch(function() {
-            process.exit(0);
-        });
+  io.close();
+  server.close(function() {
+    DB.close().then(function() {
+      logger.info('Shutdown', 'Done');
+      process.exit(0);
+    }).catch(function() {
+      process.exit(0);
     });
+  });
 
-    setTimeout(function() {
-        logger.warn('Shutdown', 'Forced exit after timeout');
-        process.exit(1);
-    }, 5000);
+  // Force exit after 5s
+  setTimeout(function() {
+    logger.warn('Shutdown', 'Forced exit after timeout');
+    process.exit(1);
+  }, 5000);
 }
 
-process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+process.on('SIGINT',  () => gracefulShutdown('SIGINT'));
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 
 process.on('uncaughtException', function(err) {
-    logger.error('Error', `Uncaught: ${err.message}`);
-    console.error(err.stack);
-    process.exit(1);
+  logger.error('Error', `Uncaught: ${err.message}`);
+  console.error(err.stack);
+  process.exit(1);
 });
 
 // =============================================
@@ -263,23 +248,23 @@ process.on('uncaughtException', function(err) {
 // =============================================
 
 async function start() {
-    logger.info('Server', 'Starting Login Server v2.0...');
+  logger.info('Server', 'Starting Login Server v2.1...');
 
-    try {
-        // Initialize database
-        await DB.init();
-        logger.info('Server', 'Database initialized');
+  try {
+    // Initialize database
+    await DB.init();
+    logger.info('Server', 'Database initialized');
 
-        // Start HTTP server
-        server.listen(CONSTANTS.PORT, CONSTANTS.HOST, function() {
-            printBanner();
-            logger.info('Server', `Listening on ${CONSTANTS.HOST}:${CONSTANTS.PORT}`);
-        });
+    // Start HTTP server
+    server.listen(CONSTANTS.PORT, CONSTANTS.HOST, function() {
+      printBanner();
+      logger.info('Server', `Listening on ${CONSTANTS.HOST}:${CONSTANTS.PORT}`);
+    });
 
-    } catch (err) {
-        logger.error('Server', `Failed to start: ${err.message}`);
-        process.exit(1);
-    }
+  } catch (err) {
+    logger.error('Server', `Failed to start: ${err.message}`);
+    process.exit(1);
+  }
 }
 
 // =============================================
@@ -287,30 +272,30 @@ async function start() {
 // =============================================
 
 function printBanner() {
-    console.log('');
-    console.log('╔══════════════════════════════════════════════════════════════╗');
-    console.log('║          Super Warrior Z — Login Server v2.0              ║');
-    console.log('╠══════════════════════════════════════════════════════════════╣');
-    console.log(`║ Port:        ${String(CONSTANTS.PORT).padEnd(41)}║`);
-    console.log(`║ Host:        ${String(CONSTANTS.HOST).padEnd(41)}║`);
-    console.log(`║ TEA:         OFF (verifyEnable=false)`.padEnd(56) + '║');
-    console.log(`║ CORS:        Natural Socket.IO configuration`.padEnd(56) + '║');
-    console.log(`║ Transports:  polling, websocket`.padEnd(56) + '║');
-    console.log(`║ DB:          ${CONSTANTS.DB.host}:${CONSTANTS.DB.port}/${CONSTANTS.DB.database}`.substring(0, 56).padEnd(56) + '║');
-    console.log(`║ server0Time: ${String(CONSTANTS.SERVER_UTC_OFFSET_MS).padEnd(41)}║`);
-    console.log('╠══════════════════════════════════════════════════════════════╣');
-    console.log('║ Actions:                                                    ║');
-    console.log('║   loginGame      → Auto-register + token'.padEnd(56) + '║');
-    console.log('║   GetServerList   → Server selection'.padEnd(56) + '║');
-    console.log('║   SaveHistory     → Token refresh + daily count'.padEnd(56) + '║');
-    console.log('║   LoginAnnounce   → Notices'.padEnd(56) + '║');
-    console.log('║   SaveLanguage    → Language preference'.padEnd(56) + '║');
-    console.log('║   SaveUserEnterInfo → Analytics'.padEnd(56) + '║');
-    console.log('╚══════════════════════════════════════════════════════════════╝');
-    console.log('');
+  const TEA_STATUS = 'OFF (verifyEnable=false)';
+  console.log('');
+  console.log('╔══════════════════════════════════════════════════════════════╗');
+  console.log('║          Super Warrior Z — Login Server v2.1              ║');
+  console.log('╠══════════════════════════════════════════════════════════════╣');
+  console.log(`║ Port:        ${String(CONSTANTS.PORT).padEnd(43)}║`);
+  console.log(`║ Host:        ${String(CONSTANTS.HOST).padEnd(43)}║`);
+  console.log(`║ TEA:         ${TEA_STATUS.padEnd(43)}║`);
+  console.log('║ CORS:        Natural Socket.IO configuration              ║');
+  console.log('║ Transports:  polling, websocket                           ║');
+  console.log(`║ DB:          ${(CONSTANTS.DB.host+':'+CONSTANTS.DB.port+'/'+CONSTANTS.DB.database).padEnd(43)}║`);
+  console.log(`║ server0Time: ${String(CONSTANTS.SERVER_UTC_OFFSET_MS).padEnd(43)}║`);
+  console.log('╠══════════════════════════════════════════════════════════════╣');
+  console.log('║ Actions:                                                    ║');
+  console.log('║   loginGame       → Auto-register + token                  ║');
+  console.log('║   GetServerList   → Server selection                       ║');
+  console.log('║   SaveHistory     → Token refresh + daily count (DB)       ║');
+  console.log('║   LoginAnnounce   → Notices                                ║');
+  console.log('║   SaveLanguage    → Language preference                    ║');
+  console.log('║   SaveUserEnterInfo → Analytics                            ║');
+  console.log('╠══════════════════════════════════════════════════════════════╣');
+  console.log('║ FIX v2.1: compress-is-not-a-function resolved              ║');
+  console.log('╚══════════════════════════════════════════════════════════════╝');
+  console.log('');
 }
 
-// Start server
 start();
-
-module.exports = { server, io };
