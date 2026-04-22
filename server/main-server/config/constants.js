@@ -98,6 +98,27 @@ module.exports = {
     acquireTimeout:   10000,
   },
 
+
+  // ==========================================
+  // CHAT SERVER — needed for registChat handler
+  // ==========================================
+
+  /** Public hostname/IP that clients use to connect */
+  SERVER_PUBLIC_HOST: process.env.SERVER_PUBLIC_HOST || '127.0.0.1',
+
+  /** Chat server port */
+  CHAT_SERVER_PORT: parseInt(process.env.CHAT_SERVER_PORT) || 8002,
+
+  /** Dungeon server port */
+  DUNGEON_SERVER_PORT: parseInt(process.env.DUNGEON_SERVER_PORT) || 8003,
+
+  /** Default server ID */
+  DEFAULT_SERVER_ID: parseInt(process.env.DEFAULT_SERVER_ID) || 1,
+
+  
+
+
+
   // ==========================================
   // SCHEDULER
   // ==========================================
