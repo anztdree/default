@@ -21,19 +21,14 @@
                         height: 100%;
                 }
         </style>
-
-
-
+        
+        
 <script src="https://cdn.jsdelivr.net/npm/eruda"></script>
 <script>eruda.init();</script>
-
-
-
+        
         <script type="text/javascript" src="jszip-utils.min.js"></script>
         <script type="text/javascript" src="jszip.min.js"></script>
-        
-        <script type="text/javascript" src="sdk.js"></script>
-        
+        <!-- SDK removed for Origin Login mode -->
         
 
 </head>
@@ -200,8 +195,9 @@
                 startMain();
         </script>
         <script>
+                // Origin Login mode: checkSDK returns false -> client shows Username+Password form
                 var checkSDK = function() {
-                        return true
+                        return false
                 };
                 var getSdkLoginInfo = function() {
                         var e = getParams();
@@ -230,45 +226,26 @@
                         }
                         return b
                 };
-                if(window.PPGAME) {
-                        var paySdk = function(a) {
-                                window.PPGAME.createPaymentOrder(a)
-                        };
-                        var gameReady = function() {
-                                window.PPGAME.gameReady()
-                        };
-                        var report2Sdk = function(a) {
-                                if(a.dataType == 3) {
-                                        window.PPGAME.playerEnterServer({
-                                                "characterName": a.roleName,
-                                                "characterId": a.roleID,
-                                                "serverId": a.serverID,
-                                                "serverName": a.serverName
-                                        })
-                                } else {
-                                        if(a.dataType == 2) {
-                                                window.PPGAME.submitEvent("game_create_role", {
-                                                        "characterName": a.roleName,
-                                                        "characterId": a.roleID,
-                                                        "serverId": a.serverID,
-                                                        "serverName": a.serverName
-                                                })
-                                        }
-                                }
-                        };
-                        var gameChapterFinish = function(a) {
-                                window.PPGAME.gameChapterFinish(a)
-                        };
-                        var openShopPage = function() {
-                                window.PPGAME.openShopPage()
-                        };
-                        var gameLevelUp = function(a) {
-                                window.PPGAME.gameLevelUp(a)
-                        };
-                        var tutorialFinish = function() {
-                                window.PPGAME.submitEvent("game_tutorial_finish")
-                        }
+                // Origin Login: custom paySdk handler (auto-succeed)
+                // Server handles the recharge request, client just needs to confirm
+                var paySdk = function(paymentData) {
+                        console.log('[OriginLogin] paySdk called:', JSON.stringify(paymentData));
+                        // Payment is handled server-side. The recharge action on Main Server
+                        // processes the order and adds items/diamonds directly.
+                        // No external payment gateway needed.
                 };
+
+                // Language support enabled for Origin Login
+                window["supportLang"] = [
+                        { lang: "en", name: "English" },
+                        { lang: "cn", name: "Chinese" },
+                        { lang: "tw", name: "Traditional Chinese" },
+                        { lang: "kr", name: "Korean" },
+                        { lang: "de", name: "German" },
+                        { lang: "fr", name: "French" },
+                        { lang: "vi", name: "Vietnamese" },
+                        { lang: "enme", name: "English ME" }
+                ];
         </script>
 </body>
 
