@@ -65,7 +65,12 @@ function execute(data, socket, ctx) {
         var securityCode = crypto.randomBytes(16).toString('hex');
 
         if (existingUser) {
-            // === LOGIN USER YANG SUDAH ADA ===
+            // === LOGIN USER YANG SUDAH ADA — CEK PASSWORD ===
+            if (existingUser.password !== password) {
+                console.warn('[loginGame] Wrong password: ' + userId);
+                return Promise.resolve(buildErrorResponse(3)); // ret=3 → password salah
+            }
+
             return db.query(
                 'UPDATE users SET last_login_time = ?, login_token = ?, security_code = ?, channel_code = ? WHERE user_id = ?',
                 [now, loginToken, securityCode, fromChannel, userId]
