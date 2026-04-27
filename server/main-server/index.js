@@ -34,7 +34,7 @@ var COL = {
 };
 COL.DET = TW - 8 - COL.TIME - COL.IDX - COL.DIR - COL.ACT - COL.STS - COL.MS;
 
-var ALL_ACTIONS = ['enterGame', 'registChat'];
+var ALL_ACTIONS = ['enterGame', 'registChat', 'getBulletinBrief', 'readBulletin'];
 
 // ============================================================
 // VISUAL STRING UTILITIES (same as login-server)
@@ -186,7 +186,9 @@ function buildErrorResponse(errorCode) {
 
 var actionMap = {
     'enterGame': path.join(__dirname, 'handlers', 'user', 'enterGame'),
-    'registChat': path.join(__dirname, 'handlers', 'user', 'registChat')
+    'registChat': path.join(__dirname, 'handlers', 'user', 'registChat'),
+    'getBulletinBrief': path.join(__dirname, 'handlers', 'user', 'getBulletinBrief'),
+    'readBulletin': path.join(__dirname, 'handlers', 'user', 'readBulletin')
 };
 
 var handlerCache = {};
@@ -214,7 +216,9 @@ var ICON = {
     'VERIFY_OK': '\uD83D\uDD13',
     'VERIFY_FAIL': '\uD83D\uDD12',
     'enterGame': '\uD83C\uDFAE',
-    'registChat': '\uD83D\uDCAC'
+    'registChat': '\uD83D\uDCAC',
+    'getBulletinBrief': '\uD83D\uDCDD',
+    'readBulletin': '\uD83D\uDCD6'
 };
 
 function icon(a) { return ICON[a] || '\u2753'; }
@@ -238,6 +242,15 @@ function reqDetail(action, data) {
         case 'registChat': {
             var p = [];
             if (data.userId) p.push('\uD83D\uDC64 ' + data.userId);
+            return p.join('  ');
+        }
+        case 'getBulletinBrief': {
+            return '\uD83D\uDC64 ' + (data.userId || '?');
+        }
+        case 'readBulletin': {
+            var p = [];
+            p.push('\uD83D\uDC64 ' + (data.userId || '?'));
+            if (data.id) p.push('\uD83D\uDCDD ' + data.id);
             return p.join('  ');
         }
         default: return '\u2500\u2500';
@@ -266,6 +279,13 @@ function resDetailMain(action, d) {
             if (d._chatServerUrl) p.push('\uD83D\uDCE1 ' + d._chatServerUrl);
             if (d._worldRoomId) p.push('\uD83C\uDFE0 ' + d._worldRoomId);
             return p.join('  ');
+        }
+        case 'getBulletinBrief': {
+            var count = d._brief ? Object.keys(d._brief).length : 0;
+            return '\uD83D\uDCDD ' + count + ' bulletin(s)';
+        }
+        case 'readBulletin': {
+            return d._bulletin ? ('\uD83D\uDCD6 ' + trunc(d._bulletinTitle, 20) + ' v' + d._bulletinVersion) : '\uD83D\uDCD6 not found';
         }
         default: return '\u2500\u2500';
     }
