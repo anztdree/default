@@ -138,6 +138,67 @@ function initMainDb() {
         )
     `);
 
+    // ============================================================
+    // SCHEMA: friends — friend list (bidirectional)
+    // ============================================================
+    dbMain.exec(`
+        CREATE TABLE IF NOT EXISTS friends (
+            userId      TEXT NOT NULL,
+            friendId    TEXT NOT NULL,
+            addedTime   INTEGER DEFAULT 0,
+            PRIMARY KEY (userId, friendId),
+            FOREIGN KEY (userId) REFERENCES users(userId) ON DELETE CASCADE
+        )
+    `);
+
+    // ============================================================
+    // SCHEMA: friend_blacklist — blocked players
+    // ============================================================
+    dbMain.exec(`
+        CREATE TABLE IF NOT EXISTS friend_blacklist (
+            userId      TEXT NOT NULL,
+            friendId    TEXT NOT NULL,
+            PRIMARY KEY (userId, friendId)
+        )
+    `);
+
+    // ============================================================
+    // SCHEMA: friend_messages — private messages
+    // ============================================================
+    dbMain.exec(`
+        CREATE TABLE IF NOT EXISTS friend_messages (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            senderId    TEXT NOT NULL,
+            receiverId  TEXT NOT NULL,
+            content     TEXT DEFAULT '',
+            time        INTEGER DEFAULT 0
+        )
+    `);
+
+    // ============================================================
+    // SCHEMA: friend_read_time — read receipts
+    // ============================================================
+    dbMain.exec(`
+        CREATE TABLE IF NOT EXISTS friend_read_time (
+            userId      TEXT NOT NULL,
+            friendId    TEXT NOT NULL,
+            readTime    INTEGER DEFAULT 0,
+            PRIMARY KEY (userId, friendId)
+        )
+    `);
+
+    // ============================================================
+    // SCHEMA: friend_applications — pending friend requests
+    // ============================================================
+    dbMain.exec(`
+        CREATE TABLE IF NOT EXISTS friend_applications (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            senderId    TEXT NOT NULL,
+            receiverId  TEXT NOT NULL,
+            time        INTEGER DEFAULT 0
+        )
+    `);
+
     console.log('[DB] Main DB ready — ' + dbPath);
     return dbMain;
 }
@@ -368,6 +429,9 @@ module.exports = {
     dbQueryOne: dbQueryOne,
     dbRun: dbRun,
     dbTransaction: dbTransaction,
+    // Aliases — beberapa handler (friend, userMsg) memanggil nama ini
+    dbAll: dbQuery,
+    dbGet: dbQueryOne,
     // Login token
     validateLoginToken: validateLoginToken,
     getLoginUserPassword: getLoginUserPassword,
@@ -380,6 +444,7 @@ module.exports = {
     // Bulletins
     getBulletins: getBulletins,
     getBulletinById: getBulletinById,
+    getBulletin: getBulletinById,
     // Heroes
     getHeroes: getHeroes,
     createHero: createHero,

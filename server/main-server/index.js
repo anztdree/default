@@ -34,7 +34,20 @@ var COL = {
 };
 COL.DET = TW - 8 - COL.TIME - COL.IDX - COL.DIR - COL.ACT - COL.STS - COL.MS;
 
-var ALL_ACTIONS = ['enterGame', 'registChat', 'getBulletinBrief', 'readBulletin'];
+var ALL_ACTIONS = [
+    // type: user
+    'enterGame', 'registChat', 'getBulletinBrief', 'readBulletin',
+    // type: heroImage
+    'getAll',
+    // type: hero
+    'getAttrs',
+    // type: userMsg
+    'getMsgList', 'getMsg', 'readMsg', 'sendMsg', 'delFriendMsg',
+    // type: friend
+    'friendServerAction',
+    // type: guide
+    'saveGuide'
+];
 
 // ============================================================
 // VISUAL STRING UTILITIES (same as login-server)
@@ -184,24 +197,40 @@ function buildErrorResponse(errorCode) {
 // HANDLER MAP & LOADER
 // ============================================================
 
+// actionMap uses composite key "type:action" → handler module path
 var actionMap = {
-    'enterGame': path.join(__dirname, 'handlers', 'user', 'enterGame'),
-    'registChat': path.join(__dirname, 'handlers', 'user', 'registChat'),
-    'getBulletinBrief': path.join(__dirname, 'handlers', 'user', 'getBulletinBrief'),
-    'readBulletin': path.join(__dirname, 'handlers', 'user', 'readBulletin')
+    // type: user
+    'user:enterGame': path.join(__dirname, 'handlers', 'user', 'enterGame'),
+    'user:registChat': path.join(__dirname, 'handlers', 'user', 'registChat'),
+    'user:getBulletinBrief': path.join(__dirname, 'handlers', 'user', 'getBulletinBrief'),
+    'user:readBulletin': path.join(__dirname, 'handlers', 'user', 'readBulletin'),
+    // type: heroImage
+    'heroImage:getAll': path.join(__dirname, 'handlers', 'heroImage', 'getAll'),
+    // type: hero
+    'hero:getAttrs': path.join(__dirname, 'handlers', 'hero', 'getAttrs'),
+    // type: userMsg
+    'userMsg:getMsgList': path.join(__dirname, 'handlers', 'userMsg', 'getMsgList'),
+    'userMsg:getMsg': path.join(__dirname, 'handlers', 'userMsg', 'getMsg'),
+    'userMsg:readMsg': path.join(__dirname, 'handlers', 'userMsg', 'readMsg'),
+    'userMsg:sendMsg': path.join(__dirname, 'handlers', 'userMsg', 'sendMsg'),
+    'userMsg:delFriendMsg': path.join(__dirname, 'handlers', 'userMsg', 'delFriendMsg'),
+    // type: friend
+    'friend:friendServerAction': path.join(__dirname, 'handlers', 'friend', 'friendServerAction'),
+    // type: guide
+    'guide:saveGuide': path.join(__dirname, 'handlers', 'guide', 'saveGuide')
 };
 
 var handlerCache = {};
 
-function loadHandler(action) {
-    if (handlerCache[action]) return handlerCache[action];
-    var modPath = actionMap[action];
+function loadHandler(compositeKey) {
+    if (handlerCache[compositeKey]) return handlerCache[compositeKey];
+    var modPath = actionMap[compositeKey];
     if (!modPath) return null;
     try {
-        handlerCache[action] = require(modPath);
-        return handlerCache[action];
+        handlerCache[compositeKey] = require(modPath);
+        return handlerCache[compositeKey];
     } catch (err) {
-        console.error(tNow() + ' \u274C Handler "' + action + '": ' + err.message);
+        console.error(tNow() + ' \u274C Handler "' + compositeKey + '": ' + err.message);
         return null;
     }
 }
@@ -218,7 +247,16 @@ var ICON = {
     'enterGame': '\uD83C\uDFAE',
     'registChat': '\uD83D\uDCAC',
     'getBulletinBrief': '\uD83D\uDCDD',
-    'readBulletin': '\uD83D\uDCD6'
+    'readBulletin': '\uD83D\uDCD6',
+    'saveGuide': '\uD83D\uDCD5',
+    'friendServerAction': '\uD83D\uDC65',
+    'getAll': '\uD83D\uDDBC',
+    'getAttrs': '\u2694\uFE0F',
+    'getMsgList': '\uD83D\uDCE8',
+    'getMsg': '\uD83D\uDCAC',
+    'readMsg': '\u2705\uFE0F',
+    'sendMsg': '\uD83D\uDCE4',
+    'delFriendMsg': '\uD83D\uDDD1\uFE0F'
 };
 
 function icon(a) { return ICON[a] || '\u2753'; }
@@ -251,6 +289,59 @@ function reqDetail(action, data) {
             var p = [];
             p.push('\uD83D\uDC64 ' + (data.userId || '?'));
             if (data.id) p.push('\uD83D\uDCDD ' + data.id);
+            return p.join('  ');
+        }
+        case 'saveGuide': {
+            var p = [];
+            p.push('\uD83D\uDC64 ' + (data.userId || '?'));
+            if (data.guideType !== undefined) p.push('\uD83D\uDCD5 line=' + data.guideType);
+            if (data.step !== undefined) p.push('\uD83D\uDD04 step=' + data.step);
+            return p.join('  ');
+        }
+        case 'friendServerAction': {
+            var p = [];
+            p.push('\uD83D\uDC64 ' + (data.userId || '?'));
+            if (data.relayAction) p.push('\uD83D\uDD27 ' + data.relayAction);
+            if (data.friendId) p.push('\uD83D\uDC64 ' + trunc(data.friendId, 16));
+            if (data.friendIds) p.push('\uD83D\uDC64 x' + data.friendIds.length);
+            if (data.time) p.push('\uD83D\uDD52 ' + data.time);
+            return p.join('  ');
+        }
+        case 'getAll': {
+            return '\uD83D\uDC64 ' + (data.userId || '?');
+        }
+        case 'getAttrs': {
+            var p = [];
+            p.push('\uD83D\uDC64 ' + (data.userId || '?'));
+            if (data.heros) p.push('\u2694\uFE0F ' + data.heros.length + ' hero(es)');
+            return p.join('  ');
+        }
+        case 'getMsgList': {
+            return '\uD83D\uDC64 ' + (data.userId || '?');
+        }
+        case 'getMsg': {
+            var p = [];
+            p.push('\uD83D\uDC64 ' + (data.userId || '?'));
+            if (data.friendId) p.push('\uD83D\uDC64 ' + trunc(data.friendId, 16));
+            return p.join('  ');
+        }
+        case 'readMsg': {
+            var p = [];
+            p.push('\uD83D\uDC64 ' + (data.userId || '?'));
+            if (data.friendId) p.push('\uD83D\uDC64 ' + trunc(data.friendId, 16));
+            return p.join('  ');
+        }
+        case 'sendMsg': {
+            var p = [];
+            p.push('\uD83D\uDC64 ' + (data.userId || '?'));
+            if (data.friendId) p.push('\u27A1\uFE0F ' + trunc(data.friendId, 16));
+            if (data.msg) p.push('\uD83D\uDCDD ' + trunc(data.msg, 20));
+            return p.join('  ');
+        }
+        case 'delFriendMsg': {
+            var p = [];
+            p.push('\uD83D\uDC64 ' + (data.userId || '?'));
+            if (data.friendId) p.push('\uD83D\uDDD1\uFE0F ' + trunc(data.friendId, 16));
             return p.join('  ');
         }
         default: return '\u2500\u2500';
@@ -286,6 +377,91 @@ function resDetailMain(action, d) {
         }
         case 'readBulletin': {
             return d._bulletin ? ('\uD83D\uDCD6 ' + trunc(d._bulletinTitle, 20) + ' v' + d._bulletinVersion) : '\uD83D\uDCD6 not found';
+        }
+        case 'saveGuide': {
+            return '\uD83D\uDCD5 saved';
+        }
+        case 'friendServerAction': {
+            var p = [];
+            if (d.users) {
+                var ukeys = Object.keys(d.users);
+                p.push('\uD83D\uDC65 ' + ukeys.length + ' user(s)');
+                for (var ui = 0; ui < Math.min(ukeys.length, 5); ui++) {
+                    var u = d.users[ukeys[ui]];
+                    p.push(u._nickName || ukeys[ui]);
+                }
+                if (ukeys.length > 5) p.push('...+' + (ukeys.length - 5) + ' more');
+            } else if (d._msgs) {
+                p.push('\uD83D\uDCAC ' + d._msgs.length + ' msg(s)');
+            } else if (d._brief) {
+                p.push('\uD83D\uDCE8 ' + Object.keys(d._brief).length + ' chat(s)');
+            } else if (d._readTime) {
+                p.push('\u2705\uFE0F readTime=' + d._readTime);
+            } else {
+                p.push('ok');
+            }
+            return p.join('  ');
+        }
+        case 'getAll': {
+            var count = d._heros ? Object.keys(d._heros).length : 0;
+            var ids = d._heros ? Object.keys(d._heros).join(', ') : '';
+            return '\uD83D\uDDBC ' + count + ' hero image(s)  [' + trunc(ids, 30) + ']';
+        }
+        case 'getAttrs': {
+            var count = d._attrs ? Object.keys(d._attrs).length : 0;
+            var p = ['\u2694\uFE0F ' + count + ' hero(es)'];
+            if (d._attrs) {
+                var akeys = Object.keys(d._attrs);
+                for (var ai = 0; ai < akeys.length; ai++) {
+                    var aobj = d._attrs[akeys[ai]];
+                    if (aobj && aobj._items) {
+                        var hp = 0, atk = 0, spd = 0;
+                        for (var aj = 0; aj < aobj._items.length; aj++) {
+                            if (aobj._items[aj]._id === 1) hp = aobj._items[aj]._num;
+                            if (aobj._items[aj]._id === 2) atk = aobj._items[aj]._num;
+                            if (aobj._items[aj]._id === 4) spd = aobj._items[aj]._num;
+                        }
+                        p.push('[' + akeys[ai] + '] HP=' + hp + ' ATK=' + atk + ' SPD=' + spd);
+                    }
+                }
+            }
+            return p.join('  ');
+        }
+        case 'getMsgList': {
+            var count = d._brief ? Object.keys(d._brief).length : 0;
+            var p = ['\uD83D\uDCE8 ' + count + ' conversation(s)'];
+            if (d._brief) {
+                var bkeys = Object.keys(d._brief);
+                for (var bi = 0; bi < Math.min(bkeys.length, 3); bi++) {
+                    var b = d._brief[bkeys[bi]];
+                    var uname = b.userInfo && b.userInfo._nickName ? b.userInfo._nickName : bkeys[bi];
+                    p.push(uname + ': ' + (b.msg || '(no msg)'));
+                }
+                if (bkeys.length > 3) p.push('...+' + (bkeys.length - 3) + ' more');
+            }
+            return p.join('  ');
+        }
+        case 'getMsg': {
+            var count = d._msgs ? d._msgs.length : 0;
+            var p = ['\uD83D\uDCAC ' + count + ' msg(s)'];
+            if (d._msgs && d._msgs.length > 0) {
+                var first = d._msgs[0];
+                p.push('first: ' + (first._isSelf ? '[ME] ' : '') + trunc(first._context, 25));
+            }
+            if (d._msgs && d._msgs.length > 1) {
+                var last = d._msgs[d._msgs.length - 1];
+                p.push('last: ' + (last._isSelf ? '[ME] ' : '') + trunc(last._context, 25));
+            }
+            return p.join('  ');
+        }
+        case 'readMsg': {
+            return d._readTime ? ('\u2705\uFE0F readTime=' + d._readTime) : '\u2705\uFE0F ok';
+        }
+        case 'sendMsg': {
+            return '\uD83D\uDCE4 sent';
+        }
+        case 'delFriendMsg': {
+            return '\uD83D\uDDD1\uFE0F deleted';
         }
         default: return '\u2500\u2500';
     }
@@ -535,18 +711,13 @@ io.on('connection', function (socket) {
         var action = data ? data.action : null;
         var type = data ? data.type : null;
 
-        if (!action || !actionMap[action]) {
+        // Build composite key for type-aware routing
+        var compositeKey = (type && action) ? (type + ':' + action) : action;
+
+        if (!action || !actionMap[compositeKey]) {
             sess.counter++;
             ensureHeader(sess);
             console.log(tRow([tNow(), sess.counter, '\u27A1\uFE0F', icon('UNKNOWN') + ' ' + (action || '?') + ' [' + (type||'?') + ']', '\u274C UNKNOWN', '\u2500\u2500\u2500', 'action not found']));
-            return callback(buildErrorResponse(1));
-        }
-
-        // Verify type = 'user' (lowercase)
-        if (type !== 'user') {
-            sess.counter++;
-            ensureHeader(sess);
-            console.log(tRow([tNow(), sess.counter, '\u27A1\uFE0F', icon('UNKNOWN') + ' type=' + type, '\u274C TYPE', '\u2500\u2500\u2500', 'expected type=user']));
             return callback(buildErrorResponse(1));
         }
 
@@ -556,7 +727,7 @@ io.on('connection', function (socket) {
 
         logReq(sess, idx, action, data);
 
-        var handler = loadHandler(action);
+        var handler = loadHandler(compositeKey);
         if (!handler || typeof handler.execute !== 'function') {
             logResErr(sess, idx, action, 0, 1);
             sess.actions[action] = { idx: idx, status: 'error' };
