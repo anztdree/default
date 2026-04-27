@@ -77,6 +77,7 @@ function initMainDb() {
             heroDisplayId       INTEGER NOT NULL,
             heroStar            INTEGER NOT NULL DEFAULT 0,
             fragment            INTEGER NOT NULL DEFAULT 0,
+            heroTag             TEXT NOT NULL DEFAULT '',
             superSkillResetCount INTEGER NOT NULL DEFAULT 0,
             potentialResetCount  INTEGER NOT NULL DEFAULT 0,
             qigongStage         INTEGER NOT NULL DEFAULT 1,
@@ -84,7 +85,7 @@ function initMainDb() {
             gemstoneSuitId      INTEGER NOT NULL DEFAULT 0,
             expeditionMaxLevel  INTEGER NOT NULL DEFAULT 0,
             heroBaseAttr        TEXT NOT NULL DEFAULT '{}',
-            superSkillLevel     TEXT NOT NULL DEFAULT '{}',
+            superSkillLevel     TEXT NOT NULL DEFAULT '0',
             potentialLevel      TEXT NOT NULL DEFAULT '[]',
             qigong              TEXT NOT NULL DEFAULT '{"_items":[]}',
             qigongTmp           TEXT NOT NULL DEFAULT '{"_items":[]}',
@@ -93,20 +94,6 @@ function initMainDb() {
             linkTo              TEXT NOT NULL DEFAULT '[]',
             linkFrom            TEXT NOT NULL DEFAULT '',
             FOREIGN KEY (userId) REFERENCES users(userId) ON DELETE CASCADE
-        )
-    `);
-
-    // ============================================================
-    // SCHEMA: bulletins — server notice board announcements
-    // ============================================================
-    dbMain.exec(`
-        CREATE TABLE IF NOT EXISTS bulletins (
-            id         TEXT PRIMARY KEY,
-            title      TEXT NOT NULL,
-            content    TEXT NOT NULL DEFAULT '',
-            version    TEXT NOT NULL DEFAULT '1',
-            "order"   INTEGER NOT NULL DEFAULT 0,
-            created_at INTEGER NOT NULL DEFAULT (strftime('%s','now') * 1000)
         )
     `);
 
