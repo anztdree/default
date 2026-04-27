@@ -316,6 +316,24 @@ function close() {
     if (dbLogin) { dbLogin.close(); dbLogin = null; }
 }
 
+// ============================================================
+// LOGIN DB GENERIC QUERY (for registChat — read server info)
+// ============================================================
+
+/**
+ * Generic query against login DB (READ-ONLY).
+ * Returns first row or null.
+ * Used by registChat to read servers table.
+ */
+function loginDbQueryOne(sql, params) {
+    if (!dbLogin) return null;
+    try {
+        return dbLogin.prepare(sql).get(params || []) || null;
+    } catch (e) {
+        return null;
+    }
+}
+
 module.exports = {
     init: init,
     // Query helpers
@@ -326,6 +344,8 @@ module.exports = {
     // Login token
     validateLoginToken: validateLoginToken,
     getLoginUserPassword: getLoginUserPassword,
+    // Login DB generic query
+    loginDbQueryOne: loginDbQueryOne,
     // User
     getUser: getUser,
     createUser: createUser,

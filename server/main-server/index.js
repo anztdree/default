@@ -34,7 +34,7 @@ var COL = {
 };
 COL.DET = TW - 8 - COL.TIME - COL.IDX - COL.DIR - COL.ACT - COL.STS - COL.MS;
 
-var ALL_ACTIONS = ['enterGame'];
+var ALL_ACTIONS = ['enterGame', 'registChat'];
 
 // ============================================================
 // VISUAL STRING UTILITIES (same as login-server)
@@ -185,7 +185,8 @@ function buildErrorResponse(errorCode) {
 // ============================================================
 
 var actionMap = {
-    'enterGame': path.join(__dirname, 'handlers', 'user', 'enterGame')
+    'enterGame': path.join(__dirname, 'handlers', 'user', 'enterGame'),
+    'registChat': path.join(__dirname, 'handlers', 'user', 'registChat')
 };
 
 var handlerCache = {};
@@ -212,7 +213,8 @@ var ICON = {
     'DISCONNECT': '\uD83D\uDD34',
     'VERIFY_OK': '\uD83D\uDD13',
     'VERIFY_FAIL': '\uD83D\uDD12',
-    'enterGame': '\uD83C\uDFAE'
+    'enterGame': '\uD83C\uDFAE',
+    'registChat': '\uD83D\uDCAC'
 };
 
 function icon(a) { return ICON[a] || '\u2753'; }
@@ -233,6 +235,11 @@ function reqDetail(action, data) {
             if (data.gameVersion) p.push('v' + data.gameVersion);
             return p.join('  ');
         }
+        case 'registChat': {
+            var p = [];
+            if (data.userId) p.push('\uD83D\uDC64 ' + data.userId);
+            return p.join('  ');
+        }
         default: return '\u2500\u2500';
     }
 }
@@ -251,6 +258,13 @@ function resDetailMain(action, d) {
                 var teamKeys = Object.keys(d.lastTeam._lastTeamInfo);
                 p.push('\uD83D\uDC65 ' + teamKeys.length + ' teams');
             }
+            return p.join('  ');
+        }
+        case 'registChat': {
+            var p = [];
+            p.push(d._success ? '\u2705 success' : '\u274C failed');
+            if (d._chatServerUrl) p.push('\uD83D\uDCE1 ' + d._chatServerUrl);
+            if (d._worldRoomId) p.push('\uD83C\uDFE0 ' + d._worldRoomId);
             return p.join('  ');
         }
         default: return '\u2500\u2500';
