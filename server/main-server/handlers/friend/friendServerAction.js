@@ -13,57 +13,18 @@
  *     // ... additional fields per sub-action
  *   }
  *
- * ctx object: ctx.db, ctx.buildResponse, ctx.buildErrorResponse, ctx.config
+ * ctx object: ctx.db, ctx.buildResponse, ctx.buildErrorResponse, ctx.config,
+ *             ctx.notifyUser, ctx.onlineUsers
+ *
+ * NOTE: DB tables are created by db.js initMainDb() with FK constraints.
+ *       No manual ensureTables() needed here.
+ *
+ * Push notifications use ctx.notifyUser(userId, payload):
+ *   → socket.emit('Notify', { ret: 'SUCCESS', data: LZString(...), compress: true })
+ *   → Client dispatches via ts.notifyData(o) (line 114228)
  */
 
 var db = require('../../db');
-
-// ============================================================
-// TABLE INIT — runs once on first execute() call
-// ============================================================
-
-var _tablesInitialized = false;
-
-function ensureTables() {
-    if (_tablesInitialized) return;
-
-    db.dbRun('CREATE TABLE IF NOT EXISTS friends (' +
-        'userId TEXT NOT NULL,' +
-        'friendId TEXT NOT NULL,' +
-        'addedTime INTEGER DEFAULT 0,' +
-        'PRIMARY KEY (userId, friendId)' +
-        ')');
-
-    db.dbRun('CREATE TABLE IF NOT EXISTS friend_blacklist (' +
-        'userId TEXT NOT NULL,' +
-        'friendId TEXT NOT NULL,' +
-        'PRIMARY KEY (userId, friendId)' +
-        ')');
-
-    db.dbRun('CREATE TABLE IF NOT EXISTS friend_messages (' +
-        'id INTEGER PRIMARY KEY AUTOINCREMENT,' +
-        'senderId TEXT NOT NULL,' +
-        'receiverId TEXT NOT NULL,' +
-        'content TEXT DEFAULT \'\',' +
-        'time INTEGER DEFAULT 0' +
-        ')');
-
-    db.dbRun('CREATE TABLE IF NOT EXISTS friend_read_time (' +
-        'userId TEXT NOT NULL,' +
-        'friendId TEXT NOT NULL,' +
-        'readTime INTEGER DEFAULT 0,' +
-        'PRIMARY KEY (userId, friendId)' +
-        ')');
-
-    db.dbRun('CREATE TABLE IF NOT EXISTS friend_applications (' +
-        'id INTEGER PRIMARY KEY AUTOINCREMENT,' +
-        'senderId TEXT NOT NULL,' +
-        'receiverId TEXT NOT NULL,' +
-        'time INTEGER DEFAULT 0' +
-        ')');
-
-    _tablesInitialized = true;
-}
 
 // ============================================================
 // HELPERS
@@ -72,8 +33,17 @@ function ensureTables() {
 /**
  * Build a FSUserObject from userId for friend list responses.
  *
- * @param {object} db    - Database module
- * @param {string} userId - Target user ID
+ * Client deserializes via FSUser (extends TeamUserItem):
+ *   - TeamUserItem.deserialize: iterates keys, strips '_' prefix,
+ *     special-cases _superSkill (array preserved), _teams (array preserved)
+ *   - FSUser.deserialize: calls parent + sets this.state = data.state
+ *
+ * Fields used by UI (line 217848-217858):
+ *   nickName, headImage, level, headEffect, headBox, vip,
+ *   oriServerId || serverId, guildName, totalPower
+ *
+ * @param {object} db     - Database module
+ * @param {string} userId  - Target user ID
  * @param {object} config - Server config (ctx.config)
  * @returns {object|null} FSUserObject or null if user not found
  */
@@ -103,6 +73,8 @@ function buildUserInfo(db, userId, config) {
 
 /**
  * 1. queryFriends
+ *    Client (line 136208-136216): saveFriendData(n)
+ *      → iterates n.users → FSUser.deserialize(e.users[n])
  *    Returns: { users: { "<userId>": FSUserObject } }
  */
 function handleQueryFriends(data, ctx) {
@@ -124,6 +96,8 @@ function handleQueryFriends(data, ctx) {
 
 /**
  * 2. queryBlackList
+ *    Client (line 136292-136301): setMyTeamworkBlicklist(e)
+ *      → iterates e.users → FSUser.deserialize(e.users[n])
  *    Returns: { users: { "<userId>": FSUserObject } }
  */
 function handleQueryBlackList(data, ctx) {
@@ -146,14 +120,13 @@ function handleQueryBlackList(data, ctx) {
 /**
  * 3. addToBlacklist
  *    Params: friendId
+ *    Client (line 136256-136274): no response field read (local updates only)
  *    INSERT into blacklist, DELETE from friends (both directions)
  */
 function handleAddToBlacklist(data, ctx) {
     var userId = data.userId;
     var friendId = data.friendId;
     if (!userId || !friendId) return ctx.buildErrorResponse(1);
-
-    var now = Date.now();
 
     // Add to blacklist (user → friend)
     db.dbRun(
@@ -169,8 +142,9 @@ function handleAddToBlacklist(data, ctx) {
 }
 
 /**
- * 4. removeBalcklist (note: typo preserved to match client)
+ * 4. removeBalcklist (note: typo preserved to match client line 204023)
  *    Params: friendId
+ *    Client (line 204026-204029): no response field read
  *    DELETE from blacklist
  */
 function handleRemoveBlacklist(data, ctx) {
@@ -186,6 +160,7 @@ function handleRemoveBlacklist(data, ctx) {
 /**
  * 5. getMsg
  *    Params: friendId, time (timestamp)
+ *    Client (line 90631-90648, 186798-186814): n._msgs → setMessageDetalListByFriendId
  *    Returns: { _msgs: [{ _time, _isSelf, _context }] }
  */
 function handleGetMsg(data, ctx) {
@@ -217,8 +192,8 @@ function handleGetMsg(data, ctx) {
 /**
  * 6. readMsg
  *    Params: friendId
+ *    Client (line 90661-90666): t._readTime → setMessageReadWithFriendId
  *    Returns: { _readTime: timestamp }
- *    INSERT/UPDATE friend_read_time table
  */
 function handleReadMsg(data, ctx) {
     var userId = data.userId;
@@ -238,7 +213,17 @@ function handleReadMsg(data, ctx) {
 /**
  * 7. sendMsg
  *    Params: friendId, msg
- *    INSERT into friend_messages, return success
+ *
+ *    Client (line 186866-186883): teamworkFriendSendMsg
+ *      → constructs response LOCALLY using ServerTime.getInstance().getServerTime()
+ *      → does NOT read any field from server response
+ *      → server response {} is correct for this flow
+ *
+ *    PUSH to receiver via FGAddMsg (line 114095):
+ *      { action: 'FGAddMsg', friendId: senderId, msg: { _time, _context } }
+ *      → TeamworkMailInfoManager.setMessageDetalListByFriendId(friendId, [e.msg])
+ *      → TeamworkMailInfoManager.addSimpleOrChangeSimple(friendId, false, e.msg)
+ *         (3-arg version — no userInfo, unlike MailInfoManager's 4-arg version)
  */
 function handleSendMsg(data, ctx) {
     var userId = data.userId;
@@ -253,13 +238,29 @@ function handleSendMsg(data, ctx) {
         [userId, friendId, msg, now]
     );
 
+    // Push FGAddMsg to receiver if online
+    if (ctx.notifyUser) {
+        var pushed = ctx.notifyUser(friendId, {
+            action: 'FGAddMsg',
+            friendId: userId,
+            msg: {
+                _time: now,
+                _context: msg
+            }
+        });
+        if (pushed) {
+            console.log('  [friend:sendMsg] FGAddMsg → user ' + friendId);
+        }
+    }
+
     return ctx.buildResponse({});
 }
 
 /**
  * 8. delMsg
  *    Params: friendId
- *    DELETE messages with friend, return success
+ *    Client (line 186893-186903): uses closure variable 'o' (friendId from data),
+ *      NOT from server response → server response {} is correct for this flow
  */
 function handleDelMsg(data, ctx) {
     var userId = data.userId;
@@ -283,6 +284,9 @@ function handleDelMsg(data, ctx) {
 
 /**
  * 9. getMsgList
+ *    Client (line 206942-206956): n._brief → setMessageFriendSimpleList
+ *      → iterates _brief[n] → UserMessageTeamworkFriendSimpleItem
+ *      → reads lastMsgTime, lastReadTime, msg, userInfo.deserialize()
  *    Returns: { _brief: { "<userId>": { lastMsgTime, lastReadTime, msg, userInfo } } }
  */
 function handleGetMsgList(data, ctx) {
@@ -348,7 +352,8 @@ function handleGetMsgList(data, ctx) {
 /**
  * 10. delFriend
  *     Params: friendId
- *     DELETE from friends table (both directions)
+ *     Client (line 207265-207277): uses closure 'o' (friendId) for local updates only
+ *     DELETE from friends table (both directions) + clean up messages
  */
 function handleDelFriend(data, ctx) {
     var userId = data.userId;
@@ -373,6 +378,7 @@ function handleDelFriend(data, ctx) {
 /**
  * 11. apply
  *     Params: friendIds (array of userId strings)
+ *     Client (line 207290-207301): shows toast only, no response field read
  *     INSERT into friend_applications
  */
 function handleApply(data, ctx) {
@@ -399,9 +405,32 @@ function handleApply(data, ctx) {
 }
 
 /**
- * 12. getChatMsg
+ * 12. getChatMsg  ← FIXED: was returning wrong _type and raw JSON string
+ *
  *     Params: time (timestamp)
- *     Returns: { _msgs: [{ _type, _from, _param, _time }] }
+ *     Client (line 210091-210105, 232083-232097): setTeamworkFriendInvitedList(e)
+ *       → iterates e._msgs[n]
+ *       → filters: e._msgs[n]._type == TeamDungeonBroadcastID (50)
+ *       → reads: e._msgs[n]._from (sender userId)
+ *       → reads: e._msgs[n]._param (array, used by ChatItem.getBroadcastValue)
+ *         → getBroadcastValue iterates _param as array: t[0], t[1], ...
+ *       → reads: e._msgs[n].teamExist (boolean — shows "team doesn't exist" if false)
+ *       → reads: e._msgs[n]._time
+ *
+ *     OLD BUG #1: _type was hardcoded 'friend' → client filter 'friend' == 50 → FALSE
+ *                  → team dungeon invites NEVER appeared in invitation list
+ *
+ *     OLD BUG #2: _param was raw JSON string '{"_type":50,"_params":[...]}' 
+ *                  → getBroadcastValue iterated per CHARACTER → garbage text
+ *
+ *     FIX: Parse stored JSON content from handleChat:
+ *       stored: { _type, _params, teamExist }
+ *       return: { _type, _param (no 's'), _from, _time, teamExist }
+ *
+ *     Non-chat messages (plain text from handleSendMsg) are safely skipped:
+ *       JSON.parse fails → _type defaults to 0 → client filters out (0 != 50)
+ *
+ *     Returns: { _msgs: [{ _type, _from, _param, _time, teamExist }] }
  */
 function handleGetChatMsg(data, ctx) {
     var userId = data.userId;
@@ -417,11 +446,17 @@ function handleGetChatMsg(data, ctx) {
 
     var _msgs = [];
     for (var i = 0; i < msgs.length; i++) {
+        var parsed = {};
+        // handleChat stores JSON: {"_type":50,"_params":[...],"teamExist":true}
+        // handleSendMsg stores plain text — JSON.parse will throw, parsed stays {}
+        try { parsed = JSON.parse(msgs[i].content); } catch (e) {}
+
         _msgs.push({
-            _type: 'friend',
+            _type: typeof parsed._type !== 'undefined' ? parsed._type : 0,
             _from: msgs[i].senderId,
-            _param: msgs[i].content || '',
-            _time: msgs[i].time
+            _param: typeof parsed._params !== 'undefined' ? parsed._params : '',
+            _time: msgs[i].time,
+            teamExist: typeof parsed.teamExist !== 'undefined' ? parsed.teamExist : false
         });
     }
 
@@ -430,6 +465,8 @@ function handleGetChatMsg(data, ctx) {
 
 /**
  * 13. queryApplyList
+ *     Client (line 210512-210524): setTeamworkFriendApplyList(n)
+ *       → iterates n.users → FSUser.deserialize(e.users[n])
  *     Returns: { users: { "<userId>": FSUserObject } }
  */
 function handleQueryApplyList(data, ctx) {
@@ -454,9 +491,23 @@ function handleQueryApplyList(data, ctx) {
 }
 
 /**
- * 14. chat
+ * 14. chat  ← FIXED: now stores teamExist and pushes FGAddChatMsg
+ *
  *     Params: friendId, msgType, params
- *     INSERT into friend_messages (chat via friend channel)
+ *     Client request (line 208787-208796):
+ *       type: 'friend', action: 'friendServerAction', relayAction: 'chat',
+ *       userId, friendId, msgType: TeamDungeonBroadcastID (50), params
+ *
+ *     Client callback (line 208797-208801): no response field read (local updates only)
+ *
+ *     Stored in DB: JSON.stringify({ _type: msgType, _params: params, teamExist: true })
+ *       → teamExist = true because the team existed when the invite was sent
+ *       → _params preserved as-is (client sends array for dungeon invites)
+ *
+ *     PUSH to receiver via FGAddChatMsg (line 114095):
+ *       { action: 'FGAddChatMsg', msg: { _type, _param, _from, _time } }
+ *       → TeamworkManager.showInivteInfo(e)
+ *         → reads e.msg._param[3] (teamId) for gotoTeamById()
  */
 function handleChat(data, ctx) {
     var userId = data.userId;
@@ -466,12 +517,35 @@ function handleChat(data, ctx) {
     if (!userId || !friendId) return ctx.buildErrorResponse(1);
 
     var now = Date.now();
-    var content = JSON.stringify({ _type: msgType, _params: params });
+
+    // Store as JSON — parsed by handleGetChatMsg when retrieving
+    var content = JSON.stringify({
+        _type: msgType,
+        _params: params,
+        teamExist: true
+    });
 
     db.dbRun(
         'INSERT INTO friend_messages (senderId, receiverId, content, time) VALUES (?, ?, ?, ?)',
         [userId, friendId, content, now]
     );
+
+    // Push FGAddChatMsg to receiver if online
+    // Client reads: e.msg._param[3] for teamId → _param must be preserved as-is
+    if (ctx.notifyUser) {
+        var pushed = ctx.notifyUser(friendId, {
+            action: 'FGAddChatMsg',
+            msg: {
+                _type: msgType,
+                _param: params,
+                _from: userId,
+                _time: now
+            }
+        });
+        if (pushed) {
+            console.log('  [friend:chat] FGAddChatMsg → user ' + friendId);
+        }
+    }
 
     return ctx.buildResponse({});
 }
@@ -479,6 +553,7 @@ function handleChat(data, ctx) {
 /**
  * 15. handleApply
  *     Params: friendId, agree (boolean)
+ *     Client (line 209200-209212): uses local friendInfo data, no response field read
  *     If agree: add friend both directions, delete application
  *     If not: just delete application
  */
@@ -519,65 +594,68 @@ function handleHandleApply(data, ctx) {
 module.exports = {
     execute: function (data, socket, ctx) {
         return new Promise(function (resolve) {
-            // Ensure DB tables exist on first call
-            ensureTables();
+            try {
+                var relayAction = data.relayAction;
 
-            var relayAction = data.relayAction;
+                switch (relayAction) {
+                    // --- Friend list management ---
+                    case 'queryFriends':
+                        return resolve(handleQueryFriends(data, ctx));
 
-            switch (relayAction) {
-                // --- Friend list management ---
-                case 'queryFriends':
-                    return resolve(handleQueryFriends(data, ctx));
+                    case 'queryBlackList':
+                        return resolve(handleQueryBlackList(data, ctx));
 
-                case 'queryBlackList':
-                    return resolve(handleQueryBlackList(data, ctx));
+                    case 'addToBlacklist':
+                        return resolve(handleAddToBlacklist(data, ctx));
 
-                case 'addToBlacklist':
-                    return resolve(handleAddToBlacklist(data, ctx));
+                    case 'removeBalcklist':   // typo preserved to match client
+                        return resolve(handleRemoveBlacklist(data, ctx));
 
-                case 'removeBalcklist':   // typo preserved to match client
-                    return resolve(handleRemoveBlacklist(data, ctx));
+                    // --- Private messaging ---
+                    case 'getMsg':
+                        return resolve(handleGetMsg(data, ctx));
 
-                // --- Private messaging ---
-                case 'getMsg':
-                    return resolve(handleGetMsg(data, ctx));
+                    case 'readMsg':
+                        return resolve(handleReadMsg(data, ctx));
 
-                case 'readMsg':
-                    return resolve(handleReadMsg(data, ctx));
+                    case 'sendMsg':
+                        return resolve(handleSendMsg(data, ctx));
 
-                case 'sendMsg':
-                    return resolve(handleSendMsg(data, ctx));
+                    case 'delMsg':
+                        return resolve(handleDelMsg(data, ctx));
 
-                case 'delMsg':
-                    return resolve(handleDelMsg(data, ctx));
+                    case 'getMsgList':
+                        return resolve(handleGetMsgList(data, ctx));
 
-                case 'getMsgList':
-                    return resolve(handleGetMsgList(data, ctx));
+                    // --- Friend management ---
+                    case 'delFriend':
+                        return resolve(handleDelFriend(data, ctx));
 
-                // --- Friend management ---
-                case 'delFriend':
-                    return resolve(handleDelFriend(data, ctx));
+                    case 'apply':
+                        return resolve(handleApply(data, ctx));
 
-                case 'apply':
-                    return resolve(handleApply(data, ctx));
+                    // --- Chat system ---
+                    case 'getChatMsg':
+                        return resolve(handleGetChatMsg(data, ctx));
 
-                // --- Chat system ---
-                case 'getChatMsg':
-                    return resolve(handleGetChatMsg(data, ctx));
+                    case 'chat':
+                        return resolve(handleChat(data, ctx));
 
-                case 'chat':
-                    return resolve(handleChat(data, ctx));
+                    // --- Application handling ---
+                    case 'queryApplyList':
+                        return resolve(handleQueryApplyList(data, ctx));
 
-                // --- Application handling ---
-                case 'queryApplyList':
-                    return resolve(handleQueryApplyList(data, ctx));
+                    case 'handleApply':
+                        return resolve(handleHandleApply(data, ctx));
 
-                case 'handleApply':
-                    return resolve(handleHandleApply(data, ctx));
-
-                default:
-                    console.warn('[friend] Unknown relayAction: ' + relayAction);
-                    return resolve(ctx.buildErrorResponse(1));
+                    default:
+                        console.warn('[friend] Unknown relayAction: ' + relayAction);
+                        return resolve(ctx.buildErrorResponse(1));
+                }
+            } catch (err) {
+                console.error('  [friendServerAction] Error in ' + (data.relayAction || 'unknown') + ': ' + err.message);
+                console.error('  [friendServerAction] Stack: ' + err.stack);
+                resolve(ctx.buildErrorResponse(1));
             }
         });
     }
