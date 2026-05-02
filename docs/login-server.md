@@ -849,7 +849,7 @@ ts.loginUserInfo = {
 
 ---
 
-## 13. FILE STRUCTURE
+## 13. FILE STRUCTURE (SEMENTARA)
 
 ```
 server/login-server/
