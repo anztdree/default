@@ -1,0 +1,19 @@
+{
+  "name": "sdk-server",
+  "version": "1.0.0",
+  "description": "Super Warrior Z - SDK Server (PPGAME Platform)",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "better-sqlite3": "^11.7.0",
+    "express": "^4.21.0",
+    "cors": "^2.8.5"
+  }
+}
