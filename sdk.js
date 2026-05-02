@@ -588,7 +588,7 @@
             };
             var t0 = Date.now();
 
-            console.groupCollapsed('%c[PPGAME]%c 🔄 LIFECYCLE', BADGE.LIFECYCLE, BADGE.RESET);
+            console.groupCollapsed('%c[PPGAME]%c 🧿 EVENT', BADGE.LIFECYCLE, BADGE.RESET);
             console.log(ppgNow() + '  🔄 ' + stageName + ' → ' + JSON.stringify(data || null));
             console.log(ppgNow() + '  📤 POST /event/lifecycle');
 
