@@ -462,7 +462,7 @@ Detail:
 
 ---
 
-### 5.5 `getNotice` — RETURN EMPTY
+### 5.5 `LoginAnnounce` — RETURN EMPTY
 
 **Kapan dipanggil:** Setelah GetServerList response diterima (SDK path: line 138085)
 
@@ -473,7 +473,7 @@ Detail:
 **Response data (jika diperlukan di masa depan):**
 ```javascript
 {
-    "notice_id": {
+    "LoginAnnounce": {
         text: { en: "English text", id: "Teks Indonesia" },
         title: { en: "Title", id: "Judul" },
         version: string,
