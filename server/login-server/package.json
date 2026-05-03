@@ -1,0 +1,16 @@
+{
+    "name": "login-server",
+    "version": "1.0.0",
+    "description": "Super Warrior Z — Login Server (Port 8000)",
+    "main": "index.js",
+    "scripts": {
+        "start": "node index.js",
+        "dev": "LOG_LEVEL=DEBUG node index.js"
+    },
+    "dependencies": {
+        "socket.io": "^2.5.1",
+        "better-sqlite3": "^11.7.0",
+        "lz-string": "^1.5.0",
+        "chalk": "^4.1.2"
+    }
+}
