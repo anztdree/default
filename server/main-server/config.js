@@ -30,9 +30,9 @@ module.exports = {
     dungeonServerUrl: 'http://localhost:8003',
     sdkServerUrl: 'http://localhost:9999',
 
-    // ─── Chat Room IDs (default) ───
+    // ─── Chat Room IDs (hardcode — same for all players) ───
     worldRoomId: 'world_1',
-    guildRoomIdPrefix: 'guild_',
+    guildRoomId: 'guild_1',             // Hardcode — semua player 1 guild room
     teamDungeonChatRoom: 'teamDungeon_1',
     teamChatRoomId: 'team_1',
 
