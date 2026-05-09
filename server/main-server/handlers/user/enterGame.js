@@ -7,7 +7,10 @@
  * STRICT RULES: NO STUB, OVERRIDE, FORCE, BYPASS, DUMMY, ASUMSI
  * Every value traced to main.min.js logic or resource/json config.
  *
- * Traced functions:
+ * ═══════════════════════════════════════════════════════════════
+ * TRACE MAP — 99 response fields → client consumer functions
+ * ═══════════════════════════════════════════════════════════════
+ *
  *   UserDataParser.setUserInfo         → e.user
  *   UserDataParser.setOnHook           → e.hangup + e.globalWarBuffTag/LastRank/Buff/BuffEndTime
  *   UserDataParser.setSummon           → e.summon
@@ -92,6 +95,34 @@
  *   ts.currency                        → e.currency
  *   e.newUser                          → newUser flag
  *   e.broadcastRecord                  → chatJoinRecord
+ *
+ * ═══════════════════════════════════════════════════════════════
+ * BUG FIX LOG
+ * ═══════════════════════════════════════════════════════════════
+ *
+ * [FIX-001] _award field missing from training object
+ *   TRACE: main.min.js L121387 — PadipataInfoManager.setPadipataModel
+ *     t._padipataInfo._award = e   (assigns ENTIRE param, not e._award)
+ *   CAUSE: Client expects _award to exist. Without it, client reads undefined.
+ *     If _award is missing → client side _award = entire training object (client bug)
+ *     If training._award exists in stored data → circular reference on re-login
+ *   FIX: Add _award: null for new users (no training reward yet)
+ *   EVIDENCE: L190426 — resetTtemsCallBack(e.trainingModel._award) expects award format
+ *
+ * [FIX-002] updateExistingUser mutates DB cache directly (no deep clone)
+ *   CAUSE: db.getUser() returns reference to _cache Map value
+ *     Mutating returned object = mutating cache = data corruption risk
+ *   FIX: Deep clone via JSON.parse(JSON.stringify()) before modification
+ *
+ * [FIX-003] Circular reference safety before JSON.stringify
+ *   CAUSE: Client bug (L121387) sets _award = entire training object
+ *     If server stores + re-sends data with _award, nesting grows each login
+ *     Eventually creates circular: training._award._award._award... = training
+ *   FIX: Strip self-referencing _award before save and before response
+ *
+ * [FIX-004] Super detail logging — every step, every field, every value
+ *   CAUSE: Previous logs too vague, cannot debug silent errors
+ *   FIX: Step-by-step logging with field counts, data sizes, validation checks
  */
 
 // ─── Currency/Attribute IDs — main.min.js L82352-82360 ───
@@ -123,6 +154,146 @@ const DUNGEON_TYPES = {
     EXP: 1, EVOLVE: 2, EQUIP: 4, SINGA: 5, SINGB: 6, METAL: 7, Z_STONE: 8
 };
 
+// ═══════════════════════════════════════════════════════════════
+// CIRCULAR REFERENCE SAFETY
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Strip dangerous circular references from userData before JSON.stringify.
+ *
+ * Client bug (main.min.js L121387): setPadipataModel sets _award = entire param.
+ * If stored data contains _award that references parent, JSON.stringify crashes.
+ *
+ * This function walks known danger zones and removes self-referencing properties.
+ *
+ * @param {object} userData - The user data object to sanitize
+ * @param {object} logger - Logger instance for reporting
+ * @returns {number} Number of circular references removed
+ */
+function stripCircularReferences(userData, logger) {
+    let removed = 0;
+
+    // ─── Danger Zone 1: training._award ───
+    // Client L121387: t._padipataInfo._award = e (entire training param)
+    // If training._award === training itself, or training._award contains training → STRIP
+    if (userData.training) {
+        if (userData.training._award !== undefined && userData.training._award !== null) {
+            // Check if _award references the training object itself
+            if (userData.training._award === userData.training) {
+                logger.log('WARN', 'ENTER', '[CIRCULAR-SAFETY] training._award === training (self-ref) → DELETED');
+                delete userData.training._award;
+                removed++;
+            }
+            // Check if _award contains a nested _award (cascading nesting)
+            else if (userData.training._award && typeof userData.training._award === 'object') {
+                let depth = 0;
+                let ptr = userData.training._award;
+                while (ptr && ptr._award && typeof ptr._award === 'object') {
+                    depth++;
+                    if (depth > 3) {
+                        logger.log('WARN', 'ENTER', `[CIRCULAR-SAFETY] training._award nesting depth=${depth} → RESETTING _award to null`);
+                        userData.training._award = null;
+                        removed++;
+                        break;
+                    }
+                    ptr = ptr._award;
+                }
+            }
+        }
+    }
+
+    return removed;
+}
+
+/**
+ * Deep clone an object using JSON round-trip.
+ * Throws with clear error if object contains circular references.
+ *
+ * @param {object} obj - Object to clone
+ * @param {string} label - Label for error messages
+ * @param {object} logger - Logger instance
+ * @returns {object} Deep-cloned object
+ */
+function deepClone(obj, label, logger) {
+    try {
+        return JSON.parse(JSON.stringify(obj));
+    } catch (err) {
+        logger.log('ERROR', 'ENTER', `[DEEP-CLONE] Failed to clone "${label}": ${err.message}`);
+        // Attempt to identify which field causes the circular reference
+        if (obj && typeof obj === 'object') {
+            const keys = Object.keys(obj);
+            for (const key of keys) {
+                try {
+                    JSON.stringify(obj[key]);
+                } catch (innerErr) {
+                    logger.log('ERROR', 'ENTER', `[DEEP-CLONE] Circular ref found in field: "${key}" → ${innerErr.message}`);
+                }
+            }
+        }
+        throw err;
+    }
+}
+
+/**
+ * Validate and log the structure of userData before it's sent to client.
+ * Catches missing required fields and logs warnings.
+ *
+ * @param {object} userData - The user data object to validate
+ * @param {boolean} isNewUser - Whether this is a new user
+ * @param {object} logger - Logger instance
+ */
+function validateUserData(userData, isNewUser, logger) {
+    // ─── Check required top-level keys that client ALWAYS reads ───
+    const requiredKeys = [
+        'user', 'heros', 'hangup', 'totalProps', 'backpackLevel',
+        'imprint', 'weapon', 'summon', 'dungeon', 'equip',
+        'scheduleInfo', 'timesInfo', 'serverVersion', 'serverId',
+        'serverOpenDate', 'newUser', 'currency', 'lastTeam',
+        'superSkill', 'giftInfo', 'guide', 'training'
+    ];
+
+    const missingKeys = requiredKeys.filter(k => userData[k] === undefined);
+    if (missingKeys.length > 0) {
+        logger.log('WARN', 'ENTER', `[VALIDATE] Missing required keys: ${missingKeys.join(', ')}`);
+    }
+
+    // ─── Check user._attribute._items has PLAYERLEVELID ───
+    if (userData.user && userData.user._attribute && userData.user._attribute._items) {
+        const items = userData.user._attribute._items;
+        if (!items[PLAYERLEVELID]) {
+            logger.log('WARN', 'ENTER', `[VALIDATE] user._attribute._items missing PLAYERLEVELID(${PLAYERLEVELID})`);
+        }
+        if (!items[DIAMONDID]) {
+            logger.log('WARN', 'ENTER', `[VALIDATE] user._attribute._items missing DIAMONDID(${DIAMONDID})`);
+        }
+    } else {
+        logger.log('WARN', 'ENTER', '[VALIDATE] user._attribute._items is MISSING');
+    }
+
+    // ─── Check training._award exists (FIX-001) ───
+    if (userData.training) {
+        if (!userData.training.hasOwnProperty('_award')) {
+            logger.log('WARN', 'ENTER', '[VALIDATE] training._award is MISSING — client L121387 will assign _award=entire param');
+        }
+    }
+
+    // ─── Check heros has at least 1 hero ───
+    if (userData.heros && userData.heros._heros) {
+        const heroCount = Object.keys(userData.heros._heros).length;
+        if (heroCount === 0) {
+            logger.log('WARN', 'ENTER', '[VALIDATE] heros._heros is EMPTY — new user must have starter hero');
+        }
+    }
+
+    // ─── Summary ───
+    const totalKeys = Object.keys(userData).length;
+    logger.log('DEBUG', 'ENTER', `[VALIDATE] userData keys=${totalKeys} missing=${missingKeys.length} isNewUser=${isNewUser}`);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MAIN HANDLER
+// ═══════════════════════════════════════════════════════════════
+
 /**
  * Main handler function
  * @param {object} request - { type:'user', action:'enterGame', loginToken, userId, serverId, version, language, gameVersion }
@@ -133,7 +304,8 @@ async function handleEnterGame(request, ctx) {
     const startTime = Date.now();
     const { loginToken, userId, serverId, version, language, gameVersion } = request;
 
-    ctx.logger.log('INFO', 'ENTER', 'enterGame request received');
+    ctx.logger.log('INFO', 'ENTER', '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    ctx.logger.log('INFO', 'ENTER', 'enterGame REQUEST RECEIVED');
     ctx.logger.details('request',
         ['userId', userId || 'MISSING'],
         ['serverId', String(serverId)],
@@ -144,56 +316,136 @@ async function handleEnterGame(request, ctx) {
     );
 
     // ─── Step 1: Validate required fields ───
+    ctx.logger.log('DEBUG', 'ENTER', '[STEP-1] Validating required fields...');
     if (!loginToken || !userId || serverId === undefined) {
-        ctx.logger.log('WARN', 'ENTER', 'Missing required fields → ret=8');
+        ctx.logger.log('WARN', 'ENTER', `[STEP-1] FAIL → loginToken=${!!loginToken} userId=${!!userId} serverId=${serverId !== undefined} → ret=8`);
         return ctx.buildErrorResponse(8);
     }
+    ctx.logger.log('DEBUG', 'ENTER', '[STEP-1] OK — all required fields present');
 
     // ─── Step 2: Validate loginToken via SDK-Server ───
+    ctx.logger.log('DEBUG', 'ENTER', '[STEP-2] Validating loginToken via SDK-Server...');
+    const tokenStart = Date.now();
     const tokenValid = await ctx.validateLoginToken(loginToken, userId);
+    const tokenDuration = Date.now() - tokenStart;
     if (!tokenValid) {
-        ctx.logger.log('WARN', 'ENTER', 'loginToken invalid → ret=37');
+        ctx.logger.log('WARN', 'ENTER', `[STEP-2] FAIL → loginToken invalid (SDK check took ${tokenDuration}ms) → ret=37`);
         return ctx.buildErrorResponse(37);
     }
+    ctx.logger.log('DEBUG', 'ENTER', `[STEP-2] OK — loginToken valid (${tokenDuration}ms)`);
 
     // ─── Step 3: Validate serverId ───
+    ctx.logger.log('DEBUG', 'ENTER', `[STEP-3] Validating serverId: got=${serverId} expected=${ctx.config.serverId}`);
     if (parseInt(serverId) !== ctx.config.serverId) {
-        ctx.logger.log('WARN', 'ENTER', `serverId mismatch: got=${serverId} expected=${ctx.config.serverId} → ret=4`);
+        ctx.logger.log('WARN', 'ENTER', `[STEP-3] FAIL → serverId mismatch → ret=4`);
         return ctx.buildErrorResponse(4);
     }
+    ctx.logger.log('DEBUG', 'ENTER', '[STEP-3] OK — serverId matches');
 
     // ─── Step 4: Check new vs existing user ───
+    ctx.logger.log('DEBUG', 'ENTER', '[STEP-4] Checking user existence in DB...');
     const existingData = ctx.db.getUser(userId);
     const isNewUser = !existingData;
 
-    ctx.logger.log('INFO', 'ENTER', `User ${isNewUser ? 'NEW' : 'EXISTING'}`);
-    ctx.logger.detail('data', ['userId', userId], ['newUser', String(isNewUser)]);
+    if (isNewUser) {
+        ctx.logger.log('INFO', 'ENTER', `[STEP-4] NEW USER — userId=${userId} not found in DB`);
+    } else {
+        const existingKeys = Object.keys(existingData).length;
+        ctx.logger.log('INFO', 'ENTER', `[STEP-4] EXISTING USER — userId=${userId} found in DB (${existingKeys} keys)`);
+        // Log which fields exist in stored data
+        ctx.logger.log('DEBUG', 'ENTER', `[STEP-4] Existing data keys: ${Object.keys(existingData).join(', ')}`);
+        // Check if stored training has _award (potential circular source)
+        if (existingData.training && existingData.training._award !== undefined) {
+            ctx.logger.log('WARN', 'ENTER', `[STEP-4] EXISTING training._award EXISTS — value type=${typeof existingData.training._award} — potential circular ref source`);
+        }
+    }
 
     // ─── Step 5: Build or load user data ───
     let userData;
     if (isNewUser) {
+        ctx.logger.log('DEBUG', 'ENTER', '[STEP-5] Building NEW user data...');
+        const buildStart = Date.now();
         userData = buildNewUserData(userId, request, ctx);
+        const buildDuration = Date.now() - buildStart;
+        const buildKeys = Object.keys(userData).length;
+        ctx.logger.log('DEBUG', 'ENTER', `[STEP-5] NEW user data built: ${buildKeys} keys (${buildDuration}ms)`);
     } else {
+        ctx.logger.log('DEBUG', 'ENTER', '[STEP-5] Updating EXISTING user data (deep clone first)...');
+        const updateStart = Date.now();
         userData = updateExistingUser(existingData, request, ctx);
+        const updateDuration = Date.now() - updateStart;
+        ctx.logger.log('DEBUG', 'ENTER', `[STEP-5] Existing user data updated (${updateDuration}ms)`);
     }
 
-    // ─── Step 6: Save user data ───
+    // ─── Step 6: Circular reference safety check ───
+    ctx.logger.log('DEBUG', 'ENTER', '[STEP-6] Running circular reference safety check...');
+    const circRemoved = stripCircularReferences(userData, ctx.logger);
+    if (circRemoved > 0) {
+        ctx.logger.log('WARN', 'ENTER', `[STEP-6] REMOVED ${circRemoved} circular reference(s) from userData`);
+    } else {
+        ctx.logger.log('DEBUG', 'ENTER', '[STEP-6] No circular references detected');
+    }
+
+    // ─── Step 7: Validate userData structure ───
+    ctx.logger.log('DEBUG', 'ENTER', '[STEP-7] Validating userData structure...');
+    validateUserData(userData, isNewUser, ctx.logger);
+
+    // ─── Step 8: Verify JSON.stringify works BEFORE saving ───
+    ctx.logger.log('DEBUG', 'ENTER', '[STEP-8] Pre-flight JSON.stringify check...');
+    let jsonSize = 0;
+    try {
+        const jsonStr = JSON.stringify(userData);
+        jsonSize = jsonStr.length;
+        ctx.logger.log('DEBUG', 'ENTER', `[STEP-8] JSON.stringify OK — size=${jsonSize} bytes`);
+    } catch (err) {
+        ctx.logger.log('ERROR', 'ENTER', `[STEP-8] JSON.stringify FAILED: ${err.message}`);
+        // Identify which field causes the failure
+        const keys = Object.keys(userData);
+        for (const key of keys) {
+            try {
+                JSON.stringify(userData[key]);
+            } catch (innerErr) {
+                ctx.logger.log('ERROR', 'ENTER', `[STEP-8] Circular ref in field: "${key}" → ${innerErr.message}`);
+            }
+        }
+        return ctx.buildErrorResponse(1);
+    }
+
+    // ─── Step 9: Save user data ───
+    ctx.logger.log('DEBUG', 'ENTER', `[STEP-9] Saving user data to DB (${jsonSize} bytes)...`);
+    const saveStart = Date.now();
     ctx.db.saveUser(userId, userData);
+    const saveDuration = Date.now() - saveStart;
+    ctx.logger.log('DEBUG', 'ENTER', `[STEP-9] User data saved (${saveDuration}ms)`);
 
-    // ─── Step 7: Build response ───
-    const response = ctx.buildDataResponse(0, userData);
+    // ─── Step 10: Build response ───
+    ctx.logger.log('DEBUG', 'ENTER', '[STEP-10] Building response (buildDataResponse)...');
+    let response;
+    try {
+        response = ctx.buildDataResponse(0, userData);
+    } catch (err) {
+        ctx.logger.log('ERROR', 'ENTER', `[STEP-10] buildDataResponse FAILED: ${err.message}`);
+        return ctx.buildErrorResponse(1);
+    }
 
-    const duration = Date.now() - startTime;
+    // ─── Final summary ───
+    const totalDuration = Date.now() - startTime;
     const keyCount = Object.keys(userData).length;
-    ctx.logger.log('INFO', 'ENTER', `enterGame ${isNewUser ? 'NEW' : 'EXISTING'} user SUCCESS`);
+    const compressedStr = response.compress ? 'YES' : 'NO';
+    const dataBytes = typeof response.data === 'string' ? response.data.length : 0;
+
+    ctx.logger.log('INFO', 'ENTER', '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    ctx.logger.log('INFO', 'ENTER', `enterGame ${isNewUser ? 'NEW' : 'EXISTING'} user — COMPLETE`);
     ctx.logger.details('result',
         ['userId', userId],
-        ['newUser', String(isNewUser)],
-        ['keys', String(keyCount)],
-        ['compressed', String(response.compress)],
-        ['dataBytes', String(typeof response.data === 'string' ? response.data.length : 0)],
-        ['duration', duration + 'ms']
+        ['type', isNewUser ? 'NEW' : 'EXISTING'],
+        ['dataKeys', String(keyCount)],
+        ['jsonBytes', String(jsonSize)],
+        ['compressed', compressedStr],
+        ['responseBytes', String(dataBytes)],
+        ['totalDuration', totalDuration + 'ms']
     );
+    ctx.logger.log('INFO', 'ENTER', '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
     return response;
 }
@@ -211,11 +463,11 @@ function buildNewUserData(userId, request, ctx) {
     const heroRes = ctx.heroJson || {};
     const summonRes = ctx.summonJson || {};
 
-    ctx.logger.log('DEBUG', 'ENTER', 'Building new user data from resource JSONs');
+    ctx.logger.log('DEBUG', 'ENTER', '[BUILD] Resource JSONs loaded');
     ctx.logger.details('resources',
         ['constantKeys', String(Object.keys(constant).length)],
-        ['heroKeys', String(Object.keys(heroRes).length)],
-        ['summonKeys', String(Object.keys(summonRes).length)]
+        ['heroEntries', String(Object.keys(heroRes).length)],
+        ['summonPools', String(Object.keys(summonRes).length)]
     );
 
     // ─── Starter hero config ───
@@ -225,12 +477,29 @@ function buildNewUserData(userId, request, ctx) {
     const heroId = ctx.uuidv4();
     const heroConfig = heroRes[startHero] || {};
 
+    ctx.logger.log('DEBUG', 'ENTER', '[BUILD] Starter hero config');
+    ctx.logger.details('hero',
+        ['startHero', startHero],
+        ['startHeroLevel', String(startHeroLevel)],
+        ['heroInstanceId', heroId.substring(0, 12) + '...'],
+        ['heroConfigFound', String(Object.keys(heroConfig).length > 0)],
+        ['heroName', heroConfig.name || 'UNKNOWN']
+    );
+
     // ─── Currency defaults from constant.json ───
     // Traced: constant.json → startDiamond=0, startGold=0, startUserExp=0, startUserLevel=1
     const startDiamond = parseInt(constant.startDiamond) || 0;
     const startGold = parseInt(constant.startGold) || 0;
     const startUserExp = parseInt(constant.startUserExp) || 0;
     const startUserLevel = parseInt(constant.startUserLevel) || 1;
+
+    ctx.logger.log('DEBUG', 'ENTER', '[BUILD] Currency defaults from constant.json');
+    ctx.logger.details('currency',
+        ['startDiamond', String(startDiamond)],
+        ['startGold', String(startGold)],
+        ['startUserExp', String(startUserExp)],
+        ['startUserLevel', String(startUserLevel)]
+    );
 
     // ─── Dungeon times — keyed by DUNGEON_TYPE number string ───
     // Traced: CounterpartSingleton.setCounterPartTime — iterates e._dungeonTimes with Number(n) == DUNGEON_TYPE
@@ -245,6 +514,12 @@ function buildNewUserData(userId, request, ctx) {
     if (constant.signDungeonTimes !== undefined) { dungeonTimes['6'] = constant.signDungeonTimes; dungeonBuyTimes['6'] = 0; }
     if (constant.metalDungeonTimes !== undefined) { dungeonTimes['7'] = constant.metalDungeonTimes; dungeonBuyTimes['7'] = 0; }
     if (constant.zStoneDungeonTimes !== undefined) { dungeonTimes['8'] = constant.zStoneDungeonTimes; dungeonBuyTimes['8'] = 0; }
+
+    ctx.logger.log('DEBUG', 'ENTER', `[BUILD] Dungeon times: ${Object.keys(dungeonTimes).length} types configured`);
+    ctx.logger.details('dungeonTimes',
+        ['types', Object.keys(dungeonTimes).join(',')],
+        ['values', Object.values(dungeonTimes).join(',')]
+    );
 
     // ─── Build attribute items for user._attribute._items ───
     // Traced: UserDataParser.setBackpack → ItemsCommonSingleton.setItem(a, r) where a=n[o]._id, r=n[o]._num
@@ -263,6 +538,8 @@ function buildNewUserData(userId, request, ctx) {
         [TEAMCOINID]: { _id: TEAMCOINID, _num: 0 }
     };
 
+    ctx.logger.log('DEBUG', 'ENTER', `[BUILD] Attribute items: ${Object.keys(attributeItems).length} currency fields`);
+
     // ─── Build totalProps._items (same as attribute items for new user) ───
     // Traced: UserDataParser.setBackpack reads e.totalProps._items
     const totalPropsItems = {};
@@ -273,6 +550,14 @@ function buildNewUserData(userId, request, ctx) {
     // ─── Build hero object ───
     // Traced: HerosManager.readByData → SetHeroDataToModel
     const heroObj = buildStarterHero(heroId, startHero, startHeroLevel, heroConfig, now, constant);
+
+    ctx.logger.log('DEBUG', 'ENTER', '[BUILD] Starter hero object built');
+    ctx.logger.details('heroObj',
+        ['_heroId', heroId.substring(0, 12) + '...'],
+        ['_heroDisplayId', String(heroObj._heroDisplayId)],
+        ['_level', String(heroObj._heroBaseAttr._level)],
+        ['_heroStar', String(heroObj._heroStar)]
+    );
 
     // ─── Summon defaults ───
     // Traced: UserDataParser.setSummon → SummonSingleton reads n._energy, n._wishList, n._wishVersion, n._canCommonFreeTime, n._canSuperFreeTime, n._summonTimes
@@ -290,6 +575,8 @@ function buildNewUserData(userId, request, ctx) {
         };
     }
 
+    ctx.logger.log('DEBUG', 'ENTER', `[BUILD] Summon config: energy=${summonEnergy} pools=${Object.keys(summonTimes).length}`);
+
     // ─── Dungeon _dungeons — keyed by DUNGEON_TYPE number ───
     // Traced: UserDataParser.setCounterpart → CounterpartSingleton.setCounterPart(n)
     //   reads e[n]._type, e[n]._curMaxLevel, e[n]._lastLevel
@@ -300,9 +587,10 @@ function buildNewUserData(userId, request, ctx) {
     }
 
     // ═══════════════════════════════════════════════════════════
-    // BUILD RESPONSE — ALL KEYS
+    // BUILD RESPONSE — ALL 99+ KEYS
     // ═══════════════════════════════════════════════════════════
-    return {
+
+    const result = {
         // ═══ 1. user — setUserInfo ═══
         // Traced: setUserInfo reads n._id, n._pwd, n._nickName, n._headImage, n._lastLoginTime, n._createTime,
         //   n._bulletinVersions, n._oriServerId, n._nickChangeTimes (optional), n._oldName, n._account,
@@ -509,7 +797,7 @@ function buildNewUserData(userId, request, ctx) {
         // Traced: initData reads e.marketRefreshTimes, e.marketRefreshTimesRecover, e.vipMarketRefreshTimes,
         //   e.vipMarketRefreshTimesRecover, e.templeTimes, e.templeTimesRecover, e.mahaTimes, e.mahaTimesRecover,
         //   e.mineSteps, e.mineStepsRecover, e.karinFeet, e.karinFeetRecover
-        // ⚠️ NO underscore prefix on keys!
+        // WARNING: NO underscore prefix on keys!
         timesInfo: {
             templeTimes: constant.templeTestTimes || 10,
             templeTimesRecover: 0,
@@ -648,6 +936,14 @@ function buildNewUserData(userId, request, ctx) {
         // ═══ 27. training — PadipataInfoManager.setPadipataModel ═══
         // Traced: setPadipataModel reads _id, _type, _times, _timesStartRecover, _surpriseReward,
         //   _questionId, _enemyId, _cfgId, _award(=e)
+        //
+        // [FIX-001] _award field added
+        //   EVIDENCE: main.min.js L121387 — t._padipataInfo._award = e
+        //   Client BUG: assigns ENTIRE param (e) to _award, not e._award
+        //   For new user: _award = null (no training reward yet)
+        //   EVIDENCE: L190426 — resetTtemsCallBack(e.trainingModel._award) expects award format
+        //     Award format = { _changeInfo: { _items: {...} } }
+        //     null is safe because client checks with void 0 != n._award before use
         training: {
             _id: userId,
             _cfgId: 0,
@@ -657,7 +953,8 @@ function buildNewUserData(userId, request, ctx) {
             _surpriseReward: null,
             _questionId: 0,
             _enemyId: 0,
-            _enemyHp: {}
+            _enemyHp: {},
+            _award: null
         },
 
         // ═══ 28. heroSkin — HerosManager.setSkinData ═══
@@ -1073,6 +1370,12 @@ function buildNewUserData(userId, request, ctx) {
         // ═══ Extra: mergedServers — seen in live server responses ═══
         mergedServers: []
     };
+
+    // ─── Log build result ───
+    const totalKeys = Object.keys(result).length;
+    ctx.logger.log('DEBUG', 'ENTER', `[BUILD] New user data object: ${totalKeys} top-level keys`);
+
+    return result;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -1122,26 +1425,82 @@ function buildStarterHero(heroId, displayId, level, heroConfig, now, constant) {
 
 // ═══════════════════════════════════════════════════════════════
 // UPDATE EXISTING USER
+// [FIX-002] Deep clone before mutation to prevent cache corruption
 // ═══════════════════════════════════════════════════════════════
 function updateExistingUser(data, request, ctx) {
     const now = Date.now();
 
+    ctx.logger.log('DEBUG', 'ENTER', '[UPDATE] Deep cloning existing user data...');
+
+    // [FIX-002] Deep clone to prevent mutating DB cache directly
+    // db.getUser() returns reference to _cache Map value
+    // Without clone: mutations affect cache = data corruption risk
+    let cloned;
+    try {
+        cloned = deepClone(data, 'existingUserData', ctx.logger);
+    } catch (err) {
+        ctx.logger.log('ERROR', 'ENTER', `[UPDATE] Deep clone failed — attempting to strip circular refs and retry`);
+        // Emergency: strip _award from training if it's causing circular
+        if (data.training && data.training._award) {
+            ctx.logger.log('WARN', 'ENTER', `[UPDATE] Emergency: stripping training._award to break circular ref`);
+            data.training._award = null;
+        }
+        try {
+            cloned = JSON.parse(JSON.stringify(data));
+        } catch (err2) {
+            ctx.logger.log('ERROR', 'ENTER', `[UPDATE] Deep clone still failed after strip: ${err2.message}`);
+            // Last resort: return minimal data that won't crash
+            return ctx.buildErrorResponse(1);
+        }
+    }
+
     // Update login timestamps
-    if (data.user) {
-        data.user._offlineTime = data.user._lastLoginTime || 0;
-        data.user._lastLoginTime = now;
+    if (cloned.user) {
+        const prevLoginTime = cloned.user._lastLoginTime || 0;
+        cloned.user._offlineTime = prevLoginTime;
+        cloned.user._lastLoginTime = now;
+        ctx.logger.log('DEBUG', 'ENTER', `[UPDATE] user._lastLoginTime: ${prevLoginTime} → ${now}`);
+    } else {
+        ctx.logger.log('WARN', 'ENTER', '[UPDATE] cloned.user is MISSING — cannot update login timestamps');
     }
 
     // Mark as NOT new user
-    data.newUser = false;
+    cloned.newUser = false;
+
+    // [FIX-003] Strip circular _award from existing training data
+    // If client previously set _award = entire training object via L121387,
+    // and that was saved to DB, it will cause circular JSON on next login
+    if (cloned.training && cloned.training._award !== undefined && cloned.training._award !== null) {
+        ctx.logger.log('WARN', 'ENTER', `[UPDATE] Existing training._award found — type=${typeof cloned.training._award}`);
+        // Check if _award is self-referencing
+        if (cloned.training._award === cloned.training) {
+            ctx.logger.log('WARN', 'ENTER', '[UPDATE] training._award is self-referencing → setting to null');
+            cloned.training._award = null;
+        } else if (typeof cloned.training._award === 'object') {
+            // Check nesting depth
+            let depth = 0;
+            let ptr = cloned.training._award;
+            while (ptr && ptr._award && typeof ptr._award === 'object') {
+                depth++;
+                if (depth > 2) {
+                    ctx.logger.log('WARN', 'ENTER', `[UPDATE] training._award nesting depth=${depth} → resetting to null`);
+                    cloned.training._award = null;
+                    break;
+                }
+                ptr = ptr._award;
+            }
+        }
+    }
 
     // Update serverTime-sensitive fields
-    data.serverVersion = ctx.config.serverVersion;
-    data.serverId = ctx.config.serverId;
-    data.serverOpenDate = ctx.config.serverOpenDate;
-    data.currency = ctx.config.currency;
+    cloned.serverVersion = ctx.config.serverVersion;
+    cloned.serverId = ctx.config.serverId;
+    cloned.serverOpenDate = ctx.config.serverOpenDate;
+    cloned.currency = ctx.config.currency;
 
-    return data;
+    ctx.logger.log('DEBUG', 'ENTER', '[UPDATE] Existing user data updated successfully');
+
+    return cloned;
 }
 
 module.exports = handleEnterGame;
