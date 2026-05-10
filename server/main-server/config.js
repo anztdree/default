@@ -15,9 +15,7 @@ const fs = require('fs');
 // ─── Resolve resourcePath ───
 // Coba beberapa lokasi yang mungkin, prioritas:
 // 1. Environment variable RESOURCE_PATH
-// 2. /var/www/html/127.0.0.1-8000/resource/json (deploy path)
-// 3. __dirname/../../127.0.0.1-8000/resource/json (relative path)
-// 4. __dirname/../../repo/resource/json (repo fallback)
+// 2. /var/www/html//resource/json (deploy path)
 function resolveResourcePath() {
     const candidates = [];
 
@@ -55,7 +53,7 @@ function resolveResourcePath() {
     }
 
     // Fallback ke relative path (akan WARN saat loadResource gagal)
-    return path.join(__dirname, '..', '..', '127.0.0.1-8000', 'resource', 'json');
+    return path.join(__dirname, '..', '..', 'html', 'resource', 'json');
 }
 
 module.exports = {
