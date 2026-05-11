@@ -8,7 +8,10 @@
  * Database: Pure LocalStorage API (db.js)
  * Protocol: handler.process (single event for all actions)
  *
- * Handlers: user/enterGame, user/registChat
+ * Handlers: user/enterGame, user/registChat, user/getBulletinBrief,
+ *           friend/friendServerAction, heroImage/getAll, hero/getAttrs,
+ *           userMsg/getMsgList, guide/saveGuide,
+ *           hangup/saveGuideTeam, hangup/checkBattleResult
  *
  * ═══════════════════════════════════════════════════════════════
  * BUG FIX LOG
@@ -31,6 +34,14 @@ const db = require('./db');
 const tea = require('./tea');
 const enterGame = require('./handlers/user/enterGame');
 const registChat = require('./handlers/user/registChat');
+const getBulletinBrief = require('./handlers/user/getBulletinBrief');
+const friendServerAction = require('./handlers/friend/friendServerAction');
+const heroImageGetAll = require('./handlers/heroImage/getAll');
+const heroGetAttrs = require('./handlers/hero/getAttrs');
+const userMsgGetMsgList = require('./handlers/userMsg/getMsgList');
+const guideSaveGuide = require('./handlers/guide/saveGuide');
+const hangupSaveGuideTeam = require('./handlers/hangup/saveGuideTeam');
+const hangupCheckBattleResult = require('./handlers/hangup/checkBattleResult');
 
 // ─── Socket.IO 2.5.1 Setup ───
 const io = require('socket.io')(config.port, {
@@ -335,7 +346,27 @@ async function validateLoginToken(loginToken, userId) {
 const ACTION_HANDLERS = {
     user: {
         enterGame: enterGame,
-        registChat: registChat
+        registChat: registChat,
+        getBulletinBrief: getBulletinBrief
+    },
+    friend: {
+        friendServerAction: friendServerAction
+    },
+    heroImage: {
+        getAll: heroImageGetAll
+    },
+    hero: {
+        getAttrs: heroGetAttrs
+    },
+    userMsg: {
+        getMsgList: userMsgGetMsgList
+    },
+    guide: {
+        saveGuide: guideSaveGuide
+    },
+    hangup: {
+        saveGuideTeam: hangupSaveGuideTeam,
+        checkBattleResult: hangupCheckBattleResult
     }
 };
 
