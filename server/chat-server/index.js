@@ -1,65 +1,48 @@
 /**
- * index.js — CHAT-SERVER Main Entry Point
+ * index.js — CHAT-SERVER Main Entry Point (v2.0 — Better SQLite)
  * Deep-traced from main.min.js
  *
  * Port: 8002
  * Transport: Socket.IO 2.5.1
  * TEA: ON (verifyEnable = true) — L113445: chatClient = new TSSocketClient('chat-server', true)
- * Database: In-memory (no persistence needed — chat is ephemeral)
+ * Database: Better SQLite (permanent storage)
  * Protocol: handler.process (same as main-server)
  *
  * ═══════════════════════════════════════════════════════════════
- * CLIENT CONNECTION FLOW
+ * CLIENT CONNECTION FLOW (main.min.js)
  * ═══════════════════════════════════════════════════════════════
  *
  * 1. registChat (main-server) → returns chatServerUrl + worldRoomId
  * 2. clientStartChat → chatClient.connectToServer(chatServerUrl, callback)
- *    L114479: a = ts.loginInfo.serverItem.chaturl
- *    L114480: this.chatClient.connectToServer(a, o)
- *    L82537: io.connect(chatServerUrl, { reconnectionAttempts: 10 })
- *
- * 3. TEA verify handshake — L82579-82587:
- *    socket.on('verify', function(n) {
- *        var o = new TEA().encrypt(n, 'verification');
- *        socket.emit('verify', o, function(n) {
- *            0 == n.ret ? e() : ErrorHandler.ShowErrorTips(n.ret), t.destroy()
- *        });
- *    });
- *
- * 4. startChatListenNotify — L114240-114261:
- *    chatClient.listenNotify(function(e) {
- *        if ('SUCCESS' == e.ret) {
- *            t = e.data;
- *            e.compress && (t = LZString.decompressFromUTF16(t));
- *            n = JSON.parse(t);
- *            ChatDataBaseClass.getData(n._msg);
- *        }
- *    });
- *    L82522: this.socket.on('Notify', e);
- *
- * 5. chatLoginRequest — L114550-114557:
- *    processHandlerWithChat({type:'chat', action:'login', userId, serverId, version})
- *    → callback starts joining rooms (world, guild?, teamDungeon?, team?)
+ * 3. TEA verify handshake — L82579-82587
+ * 4. startChatListenNotify — L114240: listens for 'Notify' events
+ * 5. chatLoginRequest — L114550: {type:'chat', action:'login', userId, serverId}
+ * 6. Promise.all → joinRoom(world, guild?, teamDungeon?, team?)
  *
  * ═══════════════════════════════════════════════════════════════
- * HANDLERS
+ * HANDLERS (5 total)
  * ═══════════════════════════════════════════════════════════════
  *
- * chat::login     — Register userId→socket mapping
- * chat::joinRoom  — Join Socket.IO room, return message history {_record}
+ * chat::login     — Register userId→socket, sync profile dari main_server.json
+ * chat::joinRoom  — Join Socket.IO room, return message history dari SQLite
  * chat::leaveRoom — Leave Socket.IO room
- * chat::sendMsg   — Store + broadcast message via Notify, return {_time}
- * chat::getRecord — Return filtered message history since startTime
+ * chat::sendMsg   — Simpan ke SQLite, broadcast Notify (exclude sender)
+ * chat::getRecord — Return filtered history dari SQLite since startTime
  *
  * ═══════════════════════════════════════════════════════════════
- * NOTIFY FORMAT
+ * NOTIFY FORMAT (L114240-114245)
  * ═══════════════════════════════════════════════════════════════
  *
- * socket.emit('Notify', {
+ * socket.broadcast.to(roomId).emit('Notify', {
  *     ret: 'SUCCESS',         ← STRING, not number
  *     data: JSON.stringify({ _msg: msgObj }),
  *     compress: boolean
  * })
+ *
+ * Menggunakan socket.broadcast (exclude sender) karena:
+ * - Sender sudah menerima pesannya sendiri melalui sendMsg callback
+ *   (L83847: createLocalData menggunakan response._time)
+ * - Jika server juga broadcast ke sender → duplikat pesan
  *
  * STRICT RULES: NO STUB, OVERRIDE, FORCE, BYPASS, DUMMY, ASUMSI
  */
@@ -69,6 +52,7 @@ const LZString = require('lz-string');
 const logger = require('./logger');
 const config = require('./config');
 const tea = require('./tea');
+const db = require('./db');
 
 // ─── Chat Handlers ───
 const chatLogin = require('./handlers/chat/login');
@@ -86,11 +70,10 @@ const io = require('socket.io')(config.port, {
     transports: ['websocket', 'polling']
 });
 
-// ─── Session & Room Storage (in-memory) ───
-const sessions = new Map();       // socketId → { userId, serverId, rooms[], connectedAt }
+// ─── Session & Socket Storage (in-memory, ephemeral per connection) ───
+const sessions = new Map();       // socketId → { userId, serverId, rooms[], verified, ... }
 const userSockets = new Map();    // userId → socketId (latest connection)
-const roomStore = new Map();      // roomId → [ msgObj, msgObj, ... ]
-const actionCounters = new Map();
+const actionCounters = new Map(); // socketId → number
 
 // ═══════════════════════════════════════════════════════════════
 // SAFE JSON STRINGIFY — with circular reference detection
@@ -158,7 +141,6 @@ function buildDataResponse(ret, dataObj) {
 // ACTION ROUTER — chat type handlers
 // ═══════════════════════════════════════════════════════════════
 
-// Handler registry: { type: { action: handlerFn } }
 const ACTION_HANDLERS = {
     chat: {
         login: chatLogin,
@@ -185,7 +167,8 @@ io.on('connection', (socket) => {
         rooms: [],
         connectedAt: Date.now(),
         ip: clientIp,
-        transport: transport
+        transport: transport,
+        verified: false
     });
     actionCounters.set(socketId, 0);
 
@@ -199,7 +182,7 @@ io.on('connection', (socket) => {
 
     // ─── TEA HANDSHAKE ───
     // L82579-82587: socketOnVerify
-    // Server emits challenge, client encrypts with TEA key 'verification'
+    // Server emits challenge (UUID v4), client encrypts with TEA key 'verification'
     const challenge = require('uuid').v4();
     const session = sessions.get(socketId);
     session.challenge = challenge;
@@ -269,7 +252,6 @@ io.on('connection', (socket) => {
         const actionType = request.type || '';
         const fullAction = actionType ? `${actionType}::${action}` : action;
 
-        // ─── REQUEST LOG ───
         logger.actionLog('req', fullAction, 'OK');
         logger.details('request',
             ['action', action],
@@ -282,9 +264,7 @@ io.on('connection', (socket) => {
         const currentSession = sessions.get(socketId);
         if (!currentSession || !currentSession.verified) {
             logger.log('WARN', 'HANDLER', chalk.red('Socket not TEA-verified') + ' → ret=38');
-            if (typeof callback === 'function') {
-                callback(buildErrorResponse(38));
-            }
+            if (typeof callback === 'function') callback(buildErrorResponse(38));
             return;
         }
 
@@ -296,9 +276,7 @@ io.on('connection', (socket) => {
                 ['types', Object.keys(ACTION_HANDLERS).join(', ')],
                 ['action', action]
             );
-            if (typeof callback === 'function') {
-                callback(buildErrorResponse(4));
-            }
+            if (typeof callback === 'function') callback(buildErrorResponse(4));
             return;
         }
 
@@ -309,9 +287,7 @@ io.on('connection', (socket) => {
                 ['actions', Object.keys(typeHandlers).join(', ')],
                 ['requested', action]
             );
-            if (typeof callback === 'function') {
-                callback(buildErrorResponse(4));
-            }
+            if (typeof callback === 'function') callback(buildErrorResponse(4));
             return;
         }
 
@@ -329,7 +305,7 @@ io.on('connection', (socket) => {
                 session: currentSession,
                 sessions,
                 userSockets,
-                roomStore,
+                db,
                 buildDataResponse,
                 buildErrorResponse
             };
@@ -337,15 +313,12 @@ io.on('connection', (socket) => {
             const response = await handler(request, ctx);
             const handlerDuration = Date.now() - handlerStart;
 
-            // ─── RESPONSE LOG ───
             const dataLen = typeof response.data === 'string' ? response.data.length : 0;
             const isCompressed = response.compress || false;
             logger.actionLog('res', fullAction, response.ret === 0 ? 'OK' : 'ERR', null,
                 `ret=${response.ret} ${dataLen} chars ${isCompressed ? '(LZ)' : '(raw)'} ${handlerDuration}ms`);
 
-            if (typeof callback === 'function') {
-                callback(response);
-            }
+            if (typeof callback === 'function') callback(response);
         } catch (err) {
             const handlerDuration = Date.now() - handlerStart;
             logger.errorWithStack('HANDLER', `Action "${fullAction}" threw UNHANDLED error`, err);
@@ -354,9 +327,7 @@ io.on('connection', (socket) => {
                 ['message', err.message],
                 ['duration', handlerDuration + 'ms']
             );
-            if (typeof callback === 'function') {
-                callback(buildErrorResponse(1));
-            }
+            if (typeof callback === 'function') callback(buildErrorResponse(1));
         }
     });
 
@@ -390,9 +361,7 @@ io.on('connection', (socket) => {
     // ─── Transport upgrade ───
     socket.conn.on('upgrade', (transport) => {
         const s = sessions.get(socketId);
-        if (s) {
-            s.transport = transport.name;
-        }
+        if (s) s.transport = transport.name;
         logger.log('DEBUG', 'SOCKET', `Transport upgraded → ${chalk.cyan(transport.name)}`);
     });
 });
@@ -401,16 +370,17 @@ io.on('connection', (socket) => {
 // SERVER STARTUP
 // ═══════════════════════════════════════════════════════════════
 
-logger.header('SUPER WARRIOR Z — CHAT SERVER');
+logger.header('SUPER WARRIOR Z — CHAT SERVER v2.0');
 
 console.log('');
 logger.table([
     ['Port', String(config.port)],
     ['Socket.IO', '2.5.1'],
     ['TEA', 'ON (verification)'],
-    ['Storage', 'In-memory (ephemeral)'],
-    ['maxRoomMessages', String(config.maxRoomMessages)],
-    ['maxMessageLength', String(config.maxMessageLength)],
+    ['Database', 'Better SQLite'],
+    ['DB Path', config.dbPath],
+    ['Message Retention', 'Permanent (no limit)'],
+    ['Max Message Length', String(config.maxMessageLength)],
     ['compressionThreshold', String(config.compressionThreshold) + ' chars'],
     ['LOG_LEVEL', process.env.LOG_LEVEL || 'INFO']
 ]);

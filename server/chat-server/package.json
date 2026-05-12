@@ -1,15 +1,16 @@
 {
-  "name": "chat-server",
-  "version": "1.0.0",
-  "description": "Chat Server — Socket.IO 2.5.1 with TEA verification",
+  "name": "swz-chat-server",
+  "version": "2.0.0",
+  "description": "Super Warrior Z - Chat Server (port 8002) — Better SQLite Edition",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "socket.io": "2.5.1",
+    "better-sqlite3": "^11.0.0",
     "chalk": "^4.1.2",
     "lz-string": "^1.5.0",
+    "socket.io": "2.5.1",
     "uuid": "^9.0.0"
   }
 }
