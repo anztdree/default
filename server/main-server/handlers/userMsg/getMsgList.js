@@ -8,45 +8,54 @@
  * CALLER: L186590-186601, L236728-236739
  *   ts.processHandler({
  *       type: 'userMsg', action: 'getMsgList',
- *       userId: UserInfoSingleton.getInstance().userId, version: '1.0'
+ *       userId, version: '1.0'
  *   }, callback)
  *
- * CONSUMER: L186596, L236732 — callback reads:
- *   MailInfoManager.getInstance().setMessageFriendSimpleList(t._brief);
- *   → _brief is friend message summary list
+ * CONSUMER: L121134-121143 — setMessageFriendSimpleList(t._brief)
+ *   for (var n in e) {
+ *       o.lastMsgTime = e[n].lastMsgTime;
+ *       o.lastReadTime = e[n].lastReadTime;
+ *       o.msg = e[n].msg;
+ *       o.userInfo.deserialize(e[n].userInfo);  ← CRITICAL: must have userInfo
+ *   }
  *
- * RESPONSE: { _brief: Object{} }
- *   Same format as friend::friendServerAction relayAction='getMsgList'
+ * UserSimpleInfo fields (L130773): _userId, _nickName, _headImage, _level, _vip,
+ *   _headEffect, _headBox, _online, _offlineTime
  *
- * For 50%: Return stored brief from user data.
+ * RESPONSE: { _brief: { [friendId]: { lastMsgTime, lastReadTime, msg, userInfo } } }
+ *
+ * STORAGE: userData.userMsgBrief → { [friendId]: { lastMsgTime, lastReadTime, msg, userInfo } }
  *
  * STRICT RULES: NO STUB, OVERRIDE, FORCE, BYPASS, DUMMY, ASUMSI
  */
 
+const PLAYERLEVELID = 104;
+
 function handleGetMsgList(request, ctx) {
     const { userId } = request;
 
-    ctx.logger.step(1, 1, 'Get message list', 'running');
+    ctx.logger.step(1, 1, 'Get userMsg list', 'running');
     ctx.logger.details('request',
         ['userId', userId ? userId.substring(0, 20) : 'MISSING']
     );
 
     if (!userId) {
-        ctx.logger.step(1, 1, 'Get message list', 'fail', 'userId MISSING ❌');
+        ctx.logger.step(1, 1, 'Get userMsg list', 'fail', 'userId MISSING');
         return ctx.buildErrorResponse(8);
     }
 
     const userData = ctx.db.getUser(userId);
     const storedBrief = (userData && userData.userMsgBrief) ? userData.userMsgBrief : {};
 
-    ctx.logger.step(1, 1, 'Get message list', 'pass', `${Object.keys(storedBrief).length} entries`);
+    ctx.logger.step(1, 1, 'Get userMsg list', 'pass',
+        Object.keys(storedBrief).length + ' entries');
 
     ctx.logger.criticalFields([
         {
             name: '_brief',
-            value: `Object{${Object.keys(storedBrief).length}}`,
+            value: 'Object{' + Object.keys(storedBrief).length + '}',
             status: 'ok',
-            detail: 'L186596: setMessageFriendSimpleList(t._brief) → Object for friend msg summary'
+            detail: 'L121134: setMessageFriendSimpleList iterates e[n].userInfo → UserSimpleInfo.deserialize'
         }
     ]);
 
