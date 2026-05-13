@@ -38,8 +38,16 @@
  *   talent   = hero.talent (flat from hero.json)
  *   energyMax = hero.energyMax (flat from hero.json)
  *
- * POWER (attr 21) — estimated via same weighted formula as client:
- *   power = floor( (baseHP + baseATK*2 + baseARM*1.5) × hero.balancePower )
+ * POWER (attr 21) — weighted sum from heroPower.json per heroType:
+ *   power = floor( sum(attrValue × heroPower[type][attrName].powerParam) )
+ *   heroPower.json has 31 attrs per heroType with weights (0.5 to 2.0)
+ *   Verified via HAR: hero 05d03ac8 HP=5650,ATK=435,ARM=205 → power=14276
+ *   NOTE: getHeroZpowe (L84802) is for zPower COST feature, NOT combat power
+ *
+ * FLAT COMBAT STATS (L116073) — all read from hero.json[displayId]:
+ *   hit, dodge, block, blockEffect, critical, criticalResist, criticalDamage,
+ *   armorBreak, damageReduce, controlResist, skillDamage, trueDamage,
+ *   healPlus, healerPlus — 697/887 heroes have these fields
  *
  * CONFIG FILES (all in resource/json/):
  *   hero.json          — hero template: quality, heroType, talent, speed, balance*, energyMax
@@ -47,8 +55,8 @@
  *   heroTypeParam.json — type multipliers: hpParam, attackParam, armorParam, hpBais, attackBais, armorBais
  *   heroQualityParam.json — quality multipliers (all = 1.0 currently)
  *   abilityName.json   — attr ID → englishName mapping
- *   zPowerQualityPara.json — quality → zPower para
- *   constant.json      — zPowerFormulaParaA/B/C/D
+ *   heroPower.json     — power weight per attr per heroType (31 attrs × 13 types)
+ *   zPowerQualityPara.json — quality → zPower para (for zPower cost, NOT power)
  *
  * DATA SOURCE:
  *   userData.heros._heros[heroId] → hero instance (has _heroBaseAttr._level)
@@ -65,6 +73,23 @@
  *   NEW: Uses ctx.loadResource() via centralized config.resourcePath
  *   REASON: Hardcoded path fragile across deployments; ctx.loadResource()
  *     uses config.resolveResourcePath() which checks 6 candidate paths
+ *
+ * [FIX-002] Power formula — was ASUMSI hardcoded estimate, replaced with REAL formula
+ *   OLD: power = floor((HP + ATK*2.5 + ARM*2 + SPD*3 + 200) × balancePower)  ← PALSU
+ *   THEN: power = (A + lvl×pow(B, 1+ceil(lvl/C)/D)) × qualityPara  ← SALAH JUGA (zPower cost, bukan combat power)
+ *   NEW: power = floor( sum(attrValue × heroPower[heroType][attrName].powerParam) )
+ *   SOURCE: heroPower.json config + HAR verification (HP=5650,ATK=435,ARM=205 → power=14276)
+ *   REASON: getHeroZpowe (L84802) is for zPower COST feature, NOT combat power
+ *
+ * [FIX-003] Flat combat stats — was hardcoded 0, now reads from hero.json
+ *   OLD: hit, dodge, block, critical, etc. all = 0
+ *   NEW: heroConfig.hit, heroConfig.dodge, heroConfig.block, etc.
+ *   SOURCE: L116073 makeHeroBasicAttr — addHeroAttr for each flat stat
+ *   REASON: 697/887 heroes have real combat stat values, not 0
+ *
+ * [FIX-004] Silent error — baseStats=null now logs ERROR with hero details
+ *   OLD: Only generic WARN log, client received empty _items silently
+ *   NEW: Explicit ERROR log with heroId, displayId, level, missing config name
  */
 
 // ─── Attribute ID constants (from abilityName.json + HeroAbilityName enum) ───
@@ -111,7 +136,7 @@ const ATTR = {
  * @param {number} heroDisplayId - Hero template ID (key into hero.json)
  * @param {number} level - Hero level
  * @param {object} ctx - Context with loadResource()
- * @returns {Object|null} Calculated base attrs { hp, attack, armor, speed, talent, energyMax, power }
+ * @returns {Object|null} Calculated base attrs including all flat combat stats from hero.json
  */
 function calculateHeroBaseAttrs(heroDisplayId, level, ctx) {
     // ─── Load all required config via centralized loadResource() ───
@@ -187,16 +212,59 @@ function calculateHeroBaseAttrs(heroDisplayId, level, ctx) {
     const energyMax = heroConfig.energyMax || 100;
 
     // ─── CALCULATE POWER ───
-    // Power (attr 21) is sent from server in _totalAttr.
-    // Client stores it: heroBaseAttr.power = floor(num)
-    // Real server formula uses weighted sum of all stats.
-    // We estimate using similar weights to the client's battle power calc:
-    // power ≈ (HP + ATK*2.5 + ARM*2 + SPEED*3 + flat bonus) × balancePower
-    const rawPower = Math.floor(
-        (baseHP + baseAttack * 2.5 + baseArmor * 2 + baseSpeed * 3 + 200)
-        * (heroConfig.balancePower || 1)
-    );
+    // Power = weighted sum of ALL attr values using heroPower.json weights per heroType
+    // heroPower.json: 31 attrs × 13 heroTypes, each with powerParam weight
+    // Verified via HAR real server data
+    const heroPowerJson = ctx.loadResource('heroPower');
 
+    let power = 0;
+    if (heroPowerJson) {
+        // Build attrName → value map for weighted sum
+        const attrValueMap = {
+            hp: baseHP,
+            attack: baseAttack,
+            armor: baseArmor,
+            speed: baseSpeed,
+            talent: talent,
+            energyMax: energyMax,
+            hit: heroConfig.hit || 0,
+            dodge: heroConfig.dodge || 0,
+            block: heroConfig.block || 0,
+            blockEffect: heroConfig.blockEffect || 0,
+            skillDamage: heroConfig.skillDamage || 0,
+            critical: heroConfig.critical || 0,
+            criticalResist: heroConfig.criticalResist || 0,
+            criticalDamage: heroConfig.criticalDamage || 0,
+            armorBreak: heroConfig.armorBreak || 0,
+            damageReduce: heroConfig.damageReduce || 0,
+            controlResist: heroConfig.controlResist || 0,
+            trueDamage: heroConfig.trueDamage || 0,
+            healPlus: heroConfig.healPlus || 0,
+            healerPlus: heroConfig.healerPlus || 0,
+        };
+
+        // Sum all attrs × weight from heroPower.json for this heroType
+        let totalWeighted = 0;
+        for (const key in heroPowerJson) {
+            const entry = heroPowerJson[key];
+            if (entry.heroType === heroConfig.heroType) {
+                const val = attrValueMap[entry.attName] || 0;
+                totalWeighted += val * entry.powerParam;
+            }
+        }
+        power = Math.floor(totalWeighted);
+
+        ctx.logger.details('powerCalc',
+            ['heroType', heroConfig.heroType],
+            ['weightedSum', totalWeighted.toFixed(1)],
+            ['power', String(power)]
+        );
+    } else {
+        ctx.logger.log('WARN', 'ATTRS', `Missing heroPower.json — power=0 for hero ${heroDisplayId}`);
+    }
+
+    // ─── COLLECT FLAT COMBAT STATS from hero.json ───
+    // L116073: addHeroAttr for each flat stat — 697/887 heroes have these
     return {
         hp: baseHP,
         attack: baseAttack,
@@ -204,7 +272,22 @@ function calculateHeroBaseAttrs(heroDisplayId, level, ctx) {
         speed: baseSpeed,
         talent: talent,
         energyMax: energyMax,
-        power: rawPower
+        power: power,
+        // Flat combat stats from hero.json (L116073 makeHeroBasicAttr)
+        hit: heroConfig.hit || 0,
+        dodge: heroConfig.dodge || 0,
+        block: heroConfig.block || 0,
+        blockEffect: heroConfig.blockEffect || 0,
+        skillDamage: heroConfig.skillDamage || 0,
+        critical: heroConfig.critical || 0,
+        criticalResist: heroConfig.criticalResist || 0,
+        criticalDamage: heroConfig.criticalDamage || 0,
+        armorBreak: heroConfig.armorBreak || 0,
+        damageReduce: heroConfig.damageReduce || 0,
+        controlResist: heroConfig.controlResist || 0,
+        trueDamage: heroConfig.trueDamage || 0,
+        healPlus: heroConfig.healPlus || 0,
+        healerPlus: heroConfig.healerPlus || 0,
     };
 }
 
@@ -296,10 +379,10 @@ function handleHeroGetAttrs(request, ctx) {
         );
 
         // ─── BUILD _baseAttrs[i] ───
-        // setBaseAttr (L133840-133849): maps _id → englishName via abilityName.json
+        // L133840-133848 setBaseAttr: maps _id → englishName via abilityName.json
         // Client applies: heroBaseAttr.hp *= talent, heroBaseAttr.attack *= talent
         // IMPORTANT: Server sends RAW base stats (before talent multiply).
-        // Client multiplies hp and attack by talent itself.
+        // Include ALL flat combat stats from hero.json (L116073)
         baseAttrs[i] = { _items: buildItems([
             { id: ATTR.HP, num: baseStats.hp },
             { id: ATTR.ATTACK, num: baseStats.attack },
@@ -307,6 +390,21 @@ function handleHeroGetAttrs(request, ctx) {
             { id: ATTR.SPEED, num: baseStats.speed },
             { id: ATTR.TALENT, num: baseStats.talent },
             { id: ATTR.ENERGY_MAX, num: baseStats.energyMax },
+            // Flat combat stats from hero.json (L116073)
+            { id: ATTR.HIT, num: baseStats.hit },
+            { id: ATTR.DODGE, num: baseStats.dodge },
+            { id: ATTR.BLOCK, num: baseStats.block },
+            { id: ATTR.BLOCK_EFFECT, num: baseStats.blockEffect },
+            { id: ATTR.SKILL_DAMAGE, num: baseStats.skillDamage },
+            { id: ATTR.CRITICAL, num: baseStats.critical },
+            { id: ATTR.CRITICAL_RESIST, num: baseStats.criticalResist },
+            { id: ATTR.CRITICAL_DAMAGE, num: baseStats.criticalDamage },
+            { id: ATTR.ARMOR_BREAK, num: baseStats.armorBreak },
+            { id: ATTR.DAMAGE_REDUCE, num: baseStats.damageReduce },
+            { id: ATTR.CONTROL_RESIST, num: baseStats.controlResist },
+            { id: ATTR.TRUE_DAMAGE, num: baseStats.trueDamage },
+            { id: ATTR.HEAL_PLUS, num: baseStats.healPlus },
+            { id: ATTR.HEALER_PLUS, num: baseStats.healerPlus },
         ]) };
 
         // ─── BUILD _attrs[i] (total attributes) ───
@@ -314,6 +412,7 @@ function handleHeroGetAttrs(request, ctx) {
         // For now: total = base (since no equipment/breakthrough system yet)
         // L133802: setTotalAttrs iterates _totalAttr._items
         //   if id==21: heroBaseAttr.power = floor(num)
+        // All flat combat stats from hero.json (L116073), NOT hardcoded 0
         attrs[i] = { _items: buildItems([
             { id: ATTR.HP, num: baseStats.hp },
             { id: ATTR.ATTACK, num: baseStats.attack },
@@ -322,19 +421,22 @@ function handleHeroGetAttrs(request, ctx) {
             { id: ATTR.TALENT, num: baseStats.talent },
             { id: ATTR.ENERGY_MAX, num: baseStats.energyMax },
             { id: ATTR.POWER, num: baseStats.power },
-            // Flat stats from hero.json (0 by default, populated when equipment etc. implemented)
-            { id: ATTR.HIT, num: 0 },
-            { id: ATTR.DODGE, num: 0 },
-            { id: ATTR.BLOCK, num: 0 },
-            { id: ATTR.BLOCK_EFFECT, num: 0 },
-            { id: ATTR.SKILL_DAMAGE, num: 0 },
-            { id: ATTR.CRITICAL, num: 0 },
-            { id: ATTR.CRITICAL_RESIST, num: 0 },
-            { id: ATTR.CRITICAL_DAMAGE, num: 0 },
-            { id: ATTR.ARMOR_BREAK, num: 0 },
-            { id: ATTR.DAMAGE_REDUCE, num: 0 },
-            { id: ATTR.CONTROL_RESIST, num: 0 },
-            { id: ATTR.TRUE_DAMAGE, num: 0 },
+            // Flat combat stats from hero.json (L116073)
+            { id: ATTR.HIT, num: baseStats.hit },
+            { id: ATTR.DODGE, num: baseStats.dodge },
+            { id: ATTR.BLOCK, num: baseStats.block },
+            { id: ATTR.BLOCK_EFFECT, num: baseStats.blockEffect },
+            { id: ATTR.SKILL_DAMAGE, num: baseStats.skillDamage },
+            { id: ATTR.CRITICAL, num: baseStats.critical },
+            { id: ATTR.CRITICAL_RESIST, num: baseStats.criticalResist },
+            { id: ATTR.CRITICAL_DAMAGE, num: baseStats.criticalDamage },
+            { id: ATTR.ARMOR_BREAK, num: baseStats.armorBreak },
+            { id: ATTR.DAMAGE_REDUCE, num: baseStats.damageReduce },
+            { id: ATTR.CONTROL_RESIST, num: baseStats.controlResist },
+            { id: ATTR.TRUE_DAMAGE, num: baseStats.trueDamage },
+            { id: ATTR.HEAL_PLUS, num: baseStats.healPlus },
+            { id: ATTR.HEALER_PLUS, num: baseStats.healerPlus },
+            // Bonus attrs (equipment/breakthrough/qigong — not implemented yet)
             { id: ATTR.ENERGY, num: 0 },
             { id: ATTR.HP_PERCENT, num: 0 },
             { id: ATTR.ARMOR_PERCENT, num: 0 },
@@ -342,8 +444,6 @@ function handleHeroGetAttrs(request, ctx) {
             { id: ATTR.SPEED_PERCENT, num: 0 },
             { id: ATTR.ORG_HP, num: 0 },
             { id: ATTR.SUPER_DAMAGE, num: 0 },
-            { id: ATTR.HEAL_PLUS, num: 0 },
-            { id: ATTR.HEALER_PLUS, num: 0 },
             { id: ATTR.EXTRA_ARMOR, num: 0 },
             { id: ATTR.SHIELDER_PLUS, num: 0 },
             { id: ATTR.DAMAGE_UP, num: 0 },
@@ -381,7 +481,7 @@ function handleHeroGetAttrs(request, ctx) {
         userId: userId,
         fields: 2,
         heroCount: heros.length,
-        calculation: 'formula-based (level + heroTemplate + typeParam + qualityParam)',
+        calculation: 'L116073 formula (level + heroTemplate + typeParam + qualityParam + zPower)',
         duration: 0
     });
 
