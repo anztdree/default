@@ -1,3 +1,4 @@
+
 /**
  * index.js — MAIN-SERVER Main Entry Point
  * Deep-traced from main.min.js
@@ -46,6 +47,7 @@ const userMsgDelFriendMsg = require('./handlers/userMsg/delFriendMsg');
 const guideSaveGuide = require('./handlers/guide/saveGuide');
 const hangupSaveGuideTeam = require('./handlers/hangup/saveGuideTeam');
 const hangupCheckBattleResult = require('./handlers/hangup/checkBattleResult');
+const buryPointGuideBattle = require('./handlers/buryPoint/guideBattle');
 
 // ─── Socket.IO 2.5.1 Setup ───
 const io = require('socket.io')(config.port, {
@@ -403,6 +405,9 @@ const ACTION_HANDLERS = {
     hangup: {
         saveGuideTeam: hangupSaveGuideTeam,
         checkBattleResult: hangupCheckBattleResult
+    },
+    buryPoint: {
+        guideBattle: buryPointGuideBattle
     }
 };
 
