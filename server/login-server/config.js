@@ -22,7 +22,7 @@ module.exports = {
             dungeonurl: 'http://127.0.0.1:8003',
             online: true,
             hot: false,
-            new: false
+            new: true
         }
     ],
     // LoginAnnounce welcome message
