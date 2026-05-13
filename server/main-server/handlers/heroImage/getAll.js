@@ -23,7 +23,19 @@
  *   Each entry: { _id: number, _maxLevel: number, _selfComments: array }
  *   _heros MUST be Object (for...in iteration).
  *
- * For 50%: Build _heros from user's owned heroes in DB.
+ * DATA SOURCE: userData.heros._heros (same data as enterGame response)
+ *   Each hero has: _heroDisplayId, _heroBaseAttr._level, etc.
+ *
+ * [FIX-001] _id: was h._heroId (internal UUID), changed to h._heroDisplayId
+ *   Client keys alreadyGainHeroIDList by displayId (L133697: checkHeroAlreadyGain(t.heroDisplayId))
+ *   Wrong ID type → hero handbook shows empty, super skill checks fail, summon "new" detection broken
+ *
+ * [FIX-002] _maxLevel: was hardcoded 1, changed to h._heroBaseAttr._level
+ *   Client uses maxLevel for: progress display (L177514), super skill availability (L88871),
+ *   auto-update on level-up (L133752). Hardcoded 1 = wrong progress, wrong skill availability
+ *
+ * [FIX-003] data path: was userData.hero._heros (wrong), changed to userData.heros._heros
+ *   enterGame.js sends "heros" (not "hero") — wrong path = no heroes returned at all
  *
  * STRICT RULES: NO STUB, OVERRIDE, FORCE, BYPASS, DUMMY, ASUMSI
  */
@@ -49,14 +61,18 @@ function handleHeroImageGetAll(request, ctx) {
     const userData = ctx.db.getUser(userId);
     const heros = {};
 
-    if (userData && userData.hero && userData.hero._heros) {
-        const userHeros = userData.hero._heros;
+    if (userData && userData.heros && userData.heros._heros) {
+        const userHeros = userData.heros._heros;
         for (const key in userHeros) {
             const h = userHeros[key];
-            if (h && h._heroId) {
+            if (h && h._heroDisplayId) {
+                // _id MUST be heroDisplayId — client keys alreadyGainHeroIDList by displayId
+                // L133697: checkHeroAlreadyGain(t.heroDisplayId) → lookup by displayId
+                // _maxLevel from actual hero level — client uses for progress & super skill checks
+                const heroLevel = (h._heroBaseAttr && h._heroBaseAttr._level) || 1;
                 heros[key] = {
-                    _id: h._heroId,
-                    _maxLevel: 1,
+                    _id: h._heroDisplayId,
+                    _maxLevel: heroLevel,
                     _selfComments: []
                 };
             }
