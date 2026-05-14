@@ -674,7 +674,10 @@ function buildNewUserData(userId, request, ctx) {
     // ─── Summon defaults ───
     // Traced: UserDataParser.setSummon → SummonSingleton reads n._energy, n._wishList, n._wishVersion, n._canCommonFreeTime, n._canSuperFreeTime, n._summonTimes
     // Also: SummonSingleton.setSummomLogList reads e.summonLog
-    const summonEnergy = (summonRes['1'] && summonRes['1'].summonEnergy) || 10;
+    // Initial energy MUST be 0 for new user.
+    // summonRes['1'].summonEnergy (=10) is energy GAINED per SUPER pull, NOT initial energy.
+    // Client display: this._energy + '/' + max (L95335)
+    const summonEnergy = 0;
     const summonTimes = {};
     for (const [poolId, poolData] of Object.entries(summonRes)) {
         summonTimes[poolId] = 0;
@@ -788,7 +791,7 @@ function buildNewUserData(userId, request, ctx) {
         // Traced: setSummon reads n._energy, n._wishList, n._wishVersion, n._canCommonFreeTime, n._canSuperFreeTime, n._summonTimes
         summon: {
             _id: userId,
-            _energy: summonEnergy,
+            _energy: 0,
             _canCommonFreeTime: now,
             _canSuperFreeTime: now,
             _summonTimes: summonTimes,
