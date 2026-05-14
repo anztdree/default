@@ -85,8 +85,23 @@
  *   NEW: use nextID from config (natural progression)
  *
  * [FIX-006] Tutorial vs regular separation
- *   Tutorial: always win, use tutorialLesson from constant.json
+ *   Tutorial: always win, use actual curLess (NOT hardcoded tutorialLessons[0])
  *   Regular: respect checkResult, use actual curLess from user data
+ *
+ * [FIX-007] Tutorial lesson selection — CRITICAL BUG
+ *   OLD: lessonId = String(tutorialLessons[0]) → ALWAYS 10101
+ *   BUG: Tutorial battle 2 (lesson 10102) got rewards from lesson 10101
+ *   FIX: lessonId = String(curLess) → use player's actual current lesson
+ *
+ * [FIX-008] Item reward sync — user._attribute._items NOT updated for NEW items
+ *   OLD: if (user._attribute._items[itemId]) → only updates EXISTING items
+ *   BUG: Equipment (3001+) and materials (131, 132) never added to attribute
+ *   Client L97698: getItemNum(c) < n[u]._num → if attribute missing, delta wrong
+ *   FIX: Always add/update item in user._attribute._items (create if missing)
+ *
+ * [FIX-009] parseInt safety for qty and newTotal
+ *   qty from lesson.json num1-num5: ensure integer
+ *   newTotal = currentNum + qty: ensure integer (no floats)
  *
  * STRICT RULES: NO STUB, OVERRIDE, FORCE, BYPASS, DUMMY, ASUMSI
  */
@@ -205,16 +220,11 @@ function handleCheckBattleResult(request, ctx) {
     ctx.logger.step(5, 5, 'Build response', 'running');
 
     // Determine which lesson config to use
-    // For tutorial: use the current tutorialLesson from constant.json
-    // For regular: use the lesson the player is currently on
-    let lessonId;
-    if (isGuide) {
-        // Tutorial: use first tutorial lesson (10101)
-        // Player progresses through tutorialLesson list
-        lessonId = String(tutorialLessons[0]);
-    } else {
-        lessonId = String(curLess);
-    }
+    // [FIX-007] Use curLess for BOTH tutorial and regular
+    // Tutorial battle 1: curLess=10101 → rewards from lesson 10101
+    // Tutorial battle 2: curLess=10102 → rewards from lesson 10102
+    // OLD BUG: always used tutorialLessons[0] = 10101 for ALL tutorial battles
+    let lessonId = String(curLess);
 
     const lessonConfig = lessonData[lessonId];
     if (!lessonConfig) {
@@ -248,25 +258,34 @@ function handleCheckBattleResult(request, ctx) {
 
             if (itemId && qty) {
                 const itemIndex = String(rewardCount);
+                // [FIX-009] parseInt safety — ensure integer qty
+                const intQty = parseInt(qty) || 0;
+                if (intQty <= 0) continue;
+
                 // FIX-004: _num = NEW TOTAL (current + reward)
-                const currentNum = currentItems[itemId] ? (currentItems[itemId]._num || 0) : 0;
-                const newTotal = currentNum + qty;
+                const currentNum = currentItems[itemId] ? (parseInt(currentItems[itemId]._num) || 0) : 0;
+                const newTotal = currentNum + intQty;
 
                 changeItems[itemIndex] = {
-                    _id: itemId,
+                    _id: parseInt(itemId),
                     _num: newTotal
                 };
 
                 // Update userData.totalProps._items with new total
                 if (!userData.totalProps) userData.totalProps = { _items: {} };
                 if (!userData.totalProps._items) userData.totalProps._items = {};
-                userData.totalProps._items[itemId] = { _id: itemId, _num: newTotal };
+                userData.totalProps._items[itemId] = { _id: parseInt(itemId), _num: newTotal };
 
-                // Also update user._attribute._items for currency types
+                // [FIX-008] ALWAYS update user._attribute._items (create if missing)
+                // Client L97698: getItemNum(c) < n[u]._num → needs attribute in sync
+                // OLD BUG: only updated if item ALREADY existed in attribute
+                // Equipment (3001+) and materials (131, 132) were NEVER added
                 if (userData.user && userData.user._attribute && userData.user._attribute._items) {
-                    if (userData.user._attribute._items[itemId]) {
-                        userData.user._attribute._items[itemId]._num = newTotal;
+                    if (!userData.user._attribute._items[itemId]) {
+                        // Item doesn't exist in attribute — CREATE it
+                        userData.user._attribute._items[itemId] = { _id: parseInt(itemId), _num: 0 };
                     }
+                    userData.user._attribute._items[itemId]._num = newTotal;
                 }
 
                 ctx.logger.details('reward',
