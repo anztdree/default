@@ -68,6 +68,10 @@ if (!config.serverOpenDate) {
     logger.log('INFO', 'CONFIG', `serverOpenDate auto-initialized: ${config.serverOpenDate}`);
 }
 
+// ─── v4.0: Install global error capture (Layer 1) ───
+// Catches uncaughtException + unhandledRejection that would be silent
+logger.fatalCapture();
+
 // ─── Resource JSON Loader ───
 const resourceCache = {};
 
@@ -661,6 +665,9 @@ io.on('connection', (socket) => {
 // ═══════════════════════════════════════════════════════════════
 
 logger.header('SUPER WARRIOR Z — MAIN SERVER');
+
+// ─── v4.0: Config Audit (Layer 3) — catch silent config mistakes ───
+logger.configAudit(config);
 
 console.log('');
 logger.table([

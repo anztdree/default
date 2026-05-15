@@ -1,26 +1,23 @@
 /**
- * logger.js — MAIN-SERVER Emoji Flow Logger (Style C) v3.0
+ * logger.js — MAIN-SERVER Logger v4.0 "Emoji Flow"
  *
- * Konsisten dengan login-server logger: emoji + chalk + tree connectors
- * Dirancang untuk reverse engineering: rapi, detail, menarik, mudah dibaca.
+ * Changelog dari v3.0:
+ *   - Request Correlation ID (reqId) — setiap request punya ID pendek
+ *   - Separator hanya di batas handler (⚔️━━), bukan per phase
+ *   - Phase box tipis (┌──┐), bukan separator tebal
+ *   - Adaptive phase — read-only handler tidak emit phase kosong
+ *   - Collapse warnings — 7x warning sama → 1 ringkasan
+ *   - Global error capture — fatalCapture(), rejectionCapture(), handlerCrash()
+ *   - Config audit — configAudit() dipanggil saat startup
+ *   - Emoji lebih meriah tapi tetap rapi
  *
- * FORMAT:
- *   LEVEL_EMOJI HH:mm:ss.SSS LEVEL  MODULE_EMOJI MODULE ▸ Message
- *     ├ DETAIL_EMOJI key: value
- *     └ DETAIL_EMOJI key: value
+ * FORMAT (dengan reqId):
+ *   LEVEL_EMOJI HH:mm:ss.SSS LEVEL  MODULE ▸ Message
+ *   REQ_ID  📦📥 PAYLOAD / phase / detail
  *
- * BOX SECTIONS:
- *   ┌ SECTION_TITLE ─────────────────────────────────────┐
- *   │  content...                                        │
- *   └────────────────────────────────────────────────────┘
- *
- * v3.0 NEW — Silent-Error Killer:
- *   errorBanner()  — 15+ baris MERAH, IMPOSSIBLE kelewat
- *   warnCallout()   — 7+ baris KUNING, terpisah dari info biasa
- *   criticalFields()— audit field yang bisa crash/stuck game
- *   summaryCard()   — ringkasan akhir yang LENGKAP
- *   statusBadge()   — badge per field (TRACED/DEFAULT/DEAD/MISSING)
- *   fieldStatus()   — shorthand single-line dengan badge
+ * FORMAT (tanpa reqId — startup/global):
+ *   LEVEL_EMOJI HH:mm:ss.SSS LEVEL  MODULE ▸ Message
+ *   🎮══ SERVER STARTUP ══
  *
  * Levels: DEBUG=0, INFO=1, WARN=2, ERROR=3
  * Default: INFO (set LOG_LEVEL=DEBUG for maximum verbosity)
@@ -47,91 +44,152 @@ const MIN_PRIORITY = LEVELS[LOG_LEVEL] ? LEVELS[LOG_LEVEL].priority : 1;
 // ═══════════════════════════════════════════════════════════════
 
 const MODULES = {
-    ENTER:     { emoji: '\u{2694}\u{FE0F}',  color: chalk.magenta },  // enterGame handler
-    BUILD:     { emoji: '\u{1F3D7}\u{FE0F}',  color: chalk.yellow },  // data construction
-    UPDATE:    { emoji: '\u{1F504}',          color: chalk.blue },      // existing user update
-    VALIDATE:  { emoji: '\u{1F50D}',          color: chalk.cyan },      // validation checks
-    SOCKET:    { emoji: '\u{1F50C}',          color: chalk.blue },      // socket connect/disconnect
-    HANDLER:   { emoji: '\u{2699}\u{FE0F}',  color: chalk.yellow },    // handler.process dispatcher
-    TEA:       { emoji: '\u{1F510}',          color: chalk.magenta },   // TEA verification
-    COMPRESS:  { emoji: '\u{1F4E6}',          color: chalk.green },     // LZ-string compression
-    SDKAPI:    { emoji: '\u{1F4E1}',          color: chalk.yellow },    // SDK-Server API calls
-    CONFIG:    { emoji: '\u{1F4CB}',          color: chalk.gray },      // configuration loading
-    SERVER:    { emoji: '\u{1F680}',          color: chalk.green },     // server startup
-    DB:        { emoji: '\u{1F4BE}',          color: chalk.cyan },      // database operations
-    CIRCULAR:  { emoji: '\u{26A0}\u{FE0F}',  color: chalk.yellow },    // circular reference checks
-    CLONE:     { emoji: '\u{1F916}',          color: chalk.cyan },      // deep clone operations
-    SERIAL:    { emoji: '\u{1F4CB}',          color: chalk.white },     // JSON serialization
-    RESP:      { emoji: '\u{1F4E4}',          color: chalk.green },     // response building
-    SAVE:      { emoji: '\u{1F4BE}',          color: chalk.cyan },      // database save
-    STEP:      { emoji: '\u{1F4CD}',          color: chalk.gray },      // pipeline step
-    TRACE:     { emoji: '\u{1F50D}',          color: chalk.magenta },   // code trace reference
+    ENTER:     { emoji: '\u{2694}\u{FE0F}',  color: chalk.magenta },
+    BUILD:     { emoji: '\u{1F3D7}\u{FE0F}',  color: chalk.yellow },
+    UPDATE:    { emoji: '\u{1F504}',          color: chalk.blue },
+    VALIDATE:  { emoji: '\u{1F50D}',          color: chalk.cyan },
+    SOCKET:    { emoji: '\u{1F50C}',          color: chalk.blue },
+    HANDLER:   { emoji: '\u{2699}\u{FE0F}',  color: chalk.yellow },
+    TEA:       { emoji: '\u{1F510}',          color: chalk.magenta },
+    COMPRESS:  { emoji: '\u{1F4E6}',          color: chalk.green },
+    SDKAPI:    { emoji: '\u{1F4E1}',          color: chalk.yellow },
+    CONFIG:    { emoji: '\u{1F4CB}',          color: chalk.gray },
+    SERVER:    { emoji: '\u{1F680}',          color: chalk.green },
+    DB:        { emoji: '\u{1F4BE}',          color: chalk.cyan },
+    CIRCULAR:  { emoji: '\u{26A0}\u{FE0F}',  color: chalk.yellow },
+    CLONE:     { emoji: '\u{1F916}',          color: chalk.cyan },
+    SERIAL:    { emoji: '\u{1F4CB}',          color: chalk.white },
+    RESP:      { emoji: '\u{1F4E4}',          color: chalk.green },
+    SAVE:      { emoji: '\u{1F4BE}',          color: chalk.cyan },
+    STEP:      { emoji: '\u{1F4CD}',          color: chalk.gray },
+    TRACE:     { emoji: '\u{1F50D}',          color: chalk.magenta },
+    CAPTURE:   { emoji: '\u{1F4A5}',          color: chalk.red },
+    AUDIT:     { emoji: '\u{1F6E1}\u{FE0F}',  color: chalk.yellow },
 };
 
 // ═══════════════════════════════════════════════════════════════
-// DETAIL EMOJI
+// PHASE ICONS — emoji unik per phase (dengan number)
 // ═══════════════════════════════════════════════════════════════
 
-const DETAILS = {
-    data:        '\u{1F4CB}',  // clipboard/data
-    important:   '\u{1F4CC}',  // pushpin
-    duration:    '\u{23F1}\u{FE0F}', // stopwatch
-    location:    '\u{1F4CD}',  // round pushpin
-    database:    '\u{1F4BE}',  // floppy disk
-    config:      '\u{2699}\u{FE0F}', // gear
-    request:     '\u{1F4E4}',  // outbox
-    response:    '\u{1F4E5}',  // inbox
-    session:     '\u{1F517}',  // link
-    user:        '\u{1F464}',  // bust in silhouette
-    hero:        '\u{1F9B8}',  // superhero
-    currency:    '\u{1F4B0}',  // money bag
-    dungeon:     '\u{2694}\u{FE0F}', // crossed swords
-    team:        '\u{1F3AF}',  // direct hit
-    skill:       '\u{2728}',  // sparkles
-    equip:       '\u{1F392}',  // school bag / armor
-    summon:      '\u{2728}',  // sparkles
-    guild:       '\u{1F3DB}\u{FE0F}', // classical building
-    gift:        '\u{1F381}',  // wrapped gift
-    check:       '\u{2705}',  // check mark
-    warn:        '\u{26A0}\u{FE0F}', // warning
-    error:       '\u{274C}',  // cross mark
-    success:     '\u{2705}',  // check mark
-    info:        '\u{2139}\u{FE0F}', // information
-    server:      '\u{1F310}',  // globe
-    size:        '\u{1F4CF}',  // straight ruler
-    field:       '\u{1F4D1}',  // bookmark tabs
-    trace:       '\u{1F50D}',  // magnifying glass
-    source:      '\u{1F4C4}',  // page facing up (code source)
-    memory:      '\u{1F9E0}',  // brain
-    arrow:       '\u{27A1}\u{FE0F}', // right arrow
-    target:      '\u{1F3AF}',  // direct hit
-    flag:        '\u{1F6A9}',  // triangular flag
-    star:        '\u{2B50}',  // star
-    diamond:     '\u{1F48E}',  // gem stone
-    gold:        '\u{1FA99}',  // gold coin
-    key:         '\u{1F511}',  // key
-    lock:        '\u{1F512}',  // locked
-    unlock:      '\u{1F513}',  // unlocked
-    rocket:      '\u{1F680}',  // rocket
-    zap:         '\u{26A1}',  // high voltage
-    fire:        '\u{1F525}',  // fire
-    shield:      '\u{1F6E1}\u{FE0F}', // shield
-    hammer:      '\u{1F528}',  // hammer
-    tool:        '\u{1F6E0}\u{FE0F}', // tools
-    bookmark:    '\u{1F516}',  // bookmark
-    tag:         '\u{1F3F7}\u{FE0F}', // label
-    counter:     '\u{1F522}',  // input numbers
-    chart:       '\u{1F4C8}',  // chart increasing
-    folder:      '\u{1F4C1}',  // folder
-    package:     '\u{1F4E6}',  // package
+const PHASE_ICONS = [
+    '\u{1F50D}', // 01 - ENTRY CHECK / VALIDATE
+    '\u{1F6E1}\u{FE0F}', // 02 - TOKEN AUTH / SECURITY
+    '\u{1F3E0}', // 03 - SERVER ID CHECK
+    '\u{1F50E}', // 04 - TYPE SCAN
+    '\u{1F5C4}\u{FE0F}', // 05 - DATABASE LOOKUP
+    '\u{2699}\u{FE0F}', // 06 - CONFIG INVARIANTS
+    '\u{1F3D7}\u{FE0F}', // 07 - BUILD DATA
+    '\u{1F504}', // 08 - CIRCULAR REF
+    '\u{1F512}', // 09 - CRITICAL FIELDS
+    '\u{1F4DC}', // 10 - JSON SERIALIZE
+    '\u{1F4BE}', // 11 - DB SAVE
+    '\u{1F4CA}', // 12 - MUTATIONS
+    '\u{1F4E4}', // 13 - RESPONSE PREP
+    '\u{1F50E}', // 14 - RESPONSE TYPE SCAN
+    '\u{1F3AF}', // 15 - EXECUTION SUMMARY
+];
+
+/**
+ * Get phase icon with circled number
+ * @param {number} num - Phase number (1-based)
+ * @returns {string} Icon string
+ */
+function phaseIcon(num) {
+    return PHASE_ICONS[(num - 1) % PHASE_ICONS.length] || '\u{1F4CD}';
+}
+
+// ═══════════════════════════════════════════════════════════════
+// DATA-TYPE EMOJIS
+// ═══════════════════════════════════════════════════════════════
+
+const DATA_EMOJI = {
+    userId:      '\u{1F464}', // 👤
+    serverId:    '\u{1F3E0}', // 🏠
+    loginToken:  '\u{1F511}', // 🔑
+    string:      '\u{1F4DD}', // 📝
+    number:      '\u{1F522}', // 🔢
+    object:      '\u{1F4E6}', // 📦
+    array:       '\u{1F4CB}', // 📋
+    boolean:     '\u{2705}', // ✅
+    null:        '\u{26AB}', // ⚫
+    undefined:   '\u{1F534}', // 🔴
+    hero:        '\u{1F9B8}', // 🦸
+    diamond:     '\u{1F48E}', // 💎
+    gold:        '\u{1FA99}', // 🪙
+    level:       '\u{1F3C6}', // 🏆
+    friend:      '\u{1F91D}', // 👥
+    blacklist:   '\u{1F6AB}', // 🚫
+    message:     '\u{1F4AC}', // 💬
+    config:      '\u{2699}\u{FE0F}', // ⚙️
+    file:        '\u{1F4C4}', // 📄
+    http:        '\u{1F310}', // 🌍
+    timing:      '\u{26A1}', // ⚡
+    action:      '\u{1F3AF}', // 🎯
+    type:        '\u{1F3AF}', // 🎯
+    impact:      '\u{1F4A5}', // 💥
+    fix:         '\u{1F527}', // 🔧
+    source:      '\u{1F4CE}', // 📎
+    empty:       '\u{1F4ED}', // 📭
+    star:        '\u{2B50}', // ⭐
+    skill:       '\u{2728}', // ✨
 };
+
+// ═══════════════════════════════════════════════════════════════
+// REQUEST CORRELATION ID SYSTEM
+// ═══════════════════════════════════════════════════════════════
+
+var _currentReqId = null;
+var _reqIdCounter = 0;
+
+/**
+ * Generate a short request ID like "R7F2A" or "A1B2C".
+ * 4-char hex, readable, unique enough for log scanning.
+ * @returns {string}
+ */
+function generateReqId() {
+    _reqIdCounter++;
+    var hex = (_reqIdCounter * 2654435761 >>> 0).toString(16).toUpperCase();
+    return hex.substring(0, 4).padStart(4, '0');
+}
+
+/**
+ * Get the current request ID.
+ * @returns {string|null}
+ */
+function getReqId() {
+    return _currentReqId;
+}
+
+/**
+ * Set the current request ID (threaded via variable).
+ * @param {string} id
+ */
+function setReqId(id) {
+    _currentReqId = id;
+}
+
+/**
+ * Clear the current request ID.
+ */
+function clearReqId() {
+    _currentReqId = null;
+}
+
+/**
+ * Build the reqId prefix string for lines inside handler context.
+ * @returns {string} e.g. " R7F2A  " or ""
+ */
+function reqPrefix() {
+    if (!_currentReqId) return '';
+    return ' ' + chalk.cyan.bold(_currentReqId) + '  ';
+}
 
 // ═══════════════════════════════════════════════════════════════
 // TIMESTAMP
 // ═══════════════════════════════════════════════════════════════
 
 function ts() {
-    const d = new Date();
+    var d = new Date();
     return chalk.gray(
         String(d.getHours()).padStart(2, '0') + ':' +
         String(d.getMinutes()).padStart(2, '0') + ':' +
@@ -140,377 +198,608 @@ function ts() {
     );
 }
 
+/**
+ * Short timestamp without milliseconds (for reqId lines inside handler).
+ * @returns {string}
+ */
+function tsShort() {
+    var d = new Date();
+    return String(d.getHours()).padStart(2, '0') + ':' +
+           String(d.getMinutes()).padStart(2, '0') + ':' +
+           String(d.getSeconds()).padStart(2, '0');
+}
+
 // ═══════════════════════════════════════════════════════════════
-// BOX WIDTH CONFIG
+// BOX WIDTH
 // ═══════════════════════════════════════════════════════════════
 
-const BOX_WIDTH = 58;
+var BOX_WIDTH = 58;
 
 // ═══════════════════════════════════════════════════════════════
-// CORE LOG — Main header line
+// v4.0 — HANDLER BOUNDARY (separator hanya di batas handler)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Print handler open boundary — the thick ⚔️━━ separator.
+ * Called ONCE per handler at the start.
+ *
+ * @param {string} reqId   - Request correlation ID
+ * @param {string} action  - Full action path e.g. "user::enterGame"
+ * @param {string} userId  - User identifier
+ * @param {object} [extra] - Extra info badges
+ * @param {string} [extra.relay]     - Relay action name (for friend handler)
+ * @param {string} [extra.userType]  - e.g. "NEW USER", "Returning User"
+ * @param {string} [extra.status]    - e.g. "NEW CONNECTION"
+ */
+function handlerOpen(reqId, action, userId, extra) {
+    extra = extra || {};
+    var W = BOX_WIDTH;
+    var sep = chalk.magenta('\u{2694}\u{FE0F}\u2501'.repeat(Math.ceil(W / 2)).substring(0, W));
+
+    console.log('');
+    console.log(sep);
+
+    // Title line with card icon
+    var titleParts = [
+        '\u{1F3CF}\u{FE0F}', // 🎴
+        chalk.cyan.bold(reqId),
+        '\u{1F4E8}', // 📨
+        chalk.white(action),
+    ];
+    if (userId) {
+        titleParts.push('\u{1F464}'); // 👤
+        titleParts.push(chalk.white(userId));
+    }
+    if (extra.userType) {
+        titleParts.push(chalk.green.bold(extra.userType === 'NEW USER' ? ' \u{1F195} NEW USER' : ' \u{1F504} ' + extra.userType));
+    }
+
+    console.log(titleParts.join(' '));
+
+    // Extra info on second line
+    if (extra.relay) {
+        console.log('          ' + chalk.gray('\u{1F4E1} relay: ') + chalk.white(extra.relay));
+    }
+
+    console.log(sep);
+}
+
+/**
+ * Print handler close boundary — summary inside ⚔️━━ separator.
+ * Called ONCE per handler at the end.
+ *
+ * @param {string} reqId   - Request correlation ID
+ * @param {string} action  - Full action path
+ * @param {object} summary
+ * @param {number} [summary.ret]        - Return code (0=success)
+ * @param {number} [summary.duration]   - Total handler time in ms
+ * @param {string} [summary.protocol]   - 'LZ-STRING' or 'RAW'
+ * @param {number} [summary.respSize]   - Response payload size in chars
+ * @param {number} [summary.jsonSize]   - Original JSON size in chars
+ * @param {number} [summary.fields]     - Total response fields
+ * @param {string} [summary.userId]     - User ID
+ * @param {string} [summary.userType]   - User type
+ * @param {number} [summary.heroes]     - Hero count
+ * @param {number} [summary.level]      - Player level
+ * @param {number} [summary.diamond]    - Diamond amount
+ * @param {object} [summary.critical]   - { passed, failed, warned }
+ * @param {number} [summary.warnings]   - Total warnings
+ * @param {number} [summary.errors]     - Total errors
+ * @param {number} [summary.typePass]   - Type assertion passes
+ * @param {number} [summary.typeFail]   - Type assertion failures
+ * @param {string} [summary.crashMsg]   - If handler crashed, crash message
+ */
+function handlerClose(reqId, action, summary) {
+    summary = summary || {};
+    var W = BOX_WIDTH;
+    var sep = chalk.magenta('\u{2694}\u{FE0F}\u2501'.repeat(Math.ceil(W / 2)).substring(0, W));
+
+    var ret = summary.ret || 0;
+    var isOk = (ret === 0);
+    var hasWarnings = (summary.warnings || 0) > 0;
+    var hasErrors = (summary.errors || 0) > 0;
+
+    // Status line
+    var statusIcon = isOk ? '\u2705' : '\u274C';
+    var statusColor = isOk ? chalk.green : chalk.red;
+    var statusText = isOk ? 'COMPLETE' : 'ret=' + ret;
+
+    // Build summary line
+    var sumLine = '\u{1F3CF}\u{FE0F} ' + chalk.cyan.bold(reqId) + '  ' +
+                  statusIcon + ' ' + chalk.white(action) + '  ' +
+                  chalk.white.bold('\u{1F3C1} ' + statusText);
+    if (summary.duration !== undefined) {
+        sumLine += '  ' + chalk.cyan.bold('\u26A1 ' + summary.duration + 'ms');
+    }
+    if (summary.protocol && summary.respSize !== undefined) {
+        var protoLabel = summary.protocol === 'LZ-STRING'
+            ? chalk.green('LZ ' + summary.respSize + ' chars')
+            : chalk.gray('RAW ' + summary.respSize + ' chars');
+        sumLine += '  ' + chalk.dim('\u{1F4CF} ') + protoLabel;
+    }
+
+    console.log('');
+    console.log(sep);
+    console.log(sumLine);
+    console.log(sep);
+
+    // Detail summary (only for complex handlers like enterGame)
+    var hasDetails = summary.userId || summary.fields || summary.heroes ||
+                     summary.level !== undefined || summary.diamond !== undefined ||
+                     summary.jsonSize || summary.critical ||
+                     summary.warnings > 0 || summary.errors > 0 ||
+                     summary.typePass !== undefined || summary.crashMsg;
+
+    if (hasDetails) {
+        var lines = [];
+
+        if (summary.userId) {
+            var userStr = chalk.white(summary.userId);
+            if (summary.userType) userStr += '  ' + chalk.green(summary.userType);
+            lines.push('   \u{1F464} USER ....... ' + userStr);
+        }
+        if (summary.heroes !== undefined) {
+            lines.push('   \u{1F9B8} HEROES ..... ' + chalk.white(String(summary.heroes)));
+        }
+        if (summary.level !== undefined) {
+            lines.push('   \u{1F3C6} LEVEL ...... ' + chalk.white(String(summary.level)));
+        }
+        if (summary.diamond !== undefined) {
+            lines.push('   \u{1F48E} DIAMOND .... ' + chalk.white(String(summary.diamond)));
+        }
+        if (summary.fields !== undefined) {
+            lines.push('   \u{1F4E6} FIELDS ..... ' + chalk.white(String(summary.fields)));
+        }
+        if (summary.jsonSize !== undefined && summary.respSize !== undefined) {
+            var pct = summary.jsonSize > 0
+                ? Math.round((1 - summary.respSize / summary.jsonSize) * 100)
+                : 0;
+            lines.push('   \u{1F4CF} JSON SIZE .. ' + chalk.white(summary.jsonSize.toLocaleString() + ' chars'));
+            lines.push('   \u{1F4E6} RESP SIZE .. ' + chalk.white(summary.respSize.toLocaleString() + ' chars') +
+                       '  (\u{1F4C9} LZ -' + pct + '%)');
+        }
+        if (summary.duration !== undefined) {
+            var dur = summary.duration;
+            var barCount = Math.min(Math.floor(dur / 10), 20);
+            var barColor = dur > 2000 ? chalk.red : dur > 1000 ? chalk.yellow : chalk.green;
+            var bar = barCount > 0 ? barColor('\u2588'.repeat(barCount)) : '';
+            lines.push('   \u{23F1}\u{FE0F}  TOTAL ..... ' + chalk.white(dur + 'ms  ') + bar);
+        }
+
+        // Critical / Warnings / Errors
+        if (lines.length > 0 && (summary.critical || summary.warnings > 0 || summary.errors > 0 || summary.typePass !== undefined)) {
+            lines.push(''); // empty separator line
+        }
+
+        if (summary.critical) {
+            var totalCrit = summary.critical.passed + summary.critical.failed + summary.critical.warned;
+            var critOk = summary.critical.failed === 0;
+            var critStr = critOk
+                ? chalk.green(summary.critical.passed + '/' + totalCrit + ' \u2705')
+                : chalk.red(summary.critical.passed + '/' + totalCrit + ' \u274C ' + summary.critical.failed + ' issues');
+            lines.push('   \u{1F512} CRITICAL ... ' + critStr);
+        }
+        if (summary.warnings > 0) {
+            lines.push('   \u{26A0}\u{FE0F}  WARNINGS .. ' + chalk.yellow(String(summary.warnings)));
+        }
+        if (summary.errors > 0) {
+            lines.push('   \u274C ERRORS .... ' + chalk.red(String(summary.errors)));
+        }
+        if (summary.typePass !== undefined) {
+            lines.push('   \u{1F9EA} TYPE ...... ' + chalk.green(summary.typePass + ' PASS') +
+                       ' / ' + chalk.red((summary.typeFail || 0) + ' FAIL'));
+        }
+        if (summary.crashMsg) {
+            lines.push('   \u{1F4A5} CRASH ..... ' + chalk.red(summary.crashMsg));
+        }
+
+        lines.forEach(function(line) {
+            console.log(line);
+        });
+    }
+
+    console.log(sep);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// v4.0 — PHASE BOX (tipis, bukan separator)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Print a thin phase header box inside a handler.
+ * Format: ┌────────────────────────────────┐
+ *         │  🔍 ① ENTRY CHECK       ⚡ 0ms │
+ *         └────────────────────────────────┘
+ *
+ * @param {string}  icon    - Phase icon (use phaseIcon(num) or custom)
+ * @param {number}  num     - Phase number
+ * @param {string}  title   - Phase title
+ * @param {number}  [duration] - Duration in ms (optional)
+ */
+function phaseBox(icon, num, title, duration) {
+    var inner = icon + ' ' + chalk.white.bold(title);
+    if (duration !== undefined) {
+        inner += chalk.cyan('  \u26A1 ' + duration + 'ms');
+    }
+    var W = 46;
+    var top = '  \u250C\u2500' + '\u2500'.repeat(W) + '\u2510';
+    var bottom = '  \u2514' + '\u2500'.repeat(W + 2) + '\u2518';
+
+    console.log('');
+    console.log(reqPrefix() + top);
+    console.log(reqPrefix() + '\u2502 ' + inner.padEnd(W + 2) + '\u2502');
+    console.log(reqPrefix() + bottom);
+}
+
+/**
+ * Phase box with circled number auto-generated.
+ * @param {number} num      - Phase number (1-based)
+ * @param {string} title    - Phase title
+ * @param {number} [duration] - Duration in ms
+ */
+function phase(num, title, duration) {
+    phaseBox(phaseIcon(num), num, title, duration);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CORE LOG — Main header line (dengan/without reqId)
 // ═══════════════════════════════════════════════════════════════
 
 function log(level, module, message) {
-    const lv = LEVELS[level] || LEVELS.INFO;
+    var lv = LEVELS[level] || LEVELS.INFO;
     if (lv.priority < MIN_PRIORITY) return;
 
-    const md = MODULES[module] || { emoji: '\u{26AA}', color: chalk.white };
-    const levelStr = lv.color(lv.label);
-    const modStr = md.color(module.padEnd(8));
+    var md = MODULES[module] || { emoji: '\u26AA', color: chalk.white };
+    var levelStr = lv.color(lv.label);
 
-    console.log(
-        `${lv.emoji} ${ts()} ${levelStr} ${md.emoji} ${modStr} \u25B8 ${chalk.white.bold(message)}`
-    );
+    if (_currentReqId) {
+        // Inside handler — use compact format with reqId
+        console.log(
+            reqPrefix() + lv.emoji + ' ' + md.emoji + ' ' + chalk.white.bold(message)
+        );
+    } else {
+        // Outside handler — full format with timestamp
+        console.log(
+            lv.emoji + ' ' + ts() + ' ' + levelStr + ' ' + md.emoji + ' ' +
+            md.color(module.padEnd(8)) + ' \u25B8 ' + chalk.white.bold(message)
+        );
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// v4.0 — PAYLOAD LOG (replaces requestDump inside handler)
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Log request payload with emoji per field type.
+ * @param {object} request - The request object
+ * @param {object} [fieldEmojis] - Optional map of fieldName → emoji override
+ */
+function payloadLog(request, fieldEmojis) {
+    if (!request || typeof request !== 'object') return;
+
+    fieldEmojis = fieldEmojis || {};
+    var keys = Object.keys(request);
+
+    console.log('');
+    console.log(reqPrefix() + '\u{1F4E5}\u{1F424} PAYLOAD');
+
+    keys.forEach(function(key) {
+        var emoji = fieldEmojis[key] || '\u{1F4CC}'; // 📌 default
+        var val = request[key];
+        var valStr;
+
+        if (val === null) {
+            valStr = chalk.gray('null');
+        } else if (val === undefined) {
+            valStr = chalk.gray('undefined');
+        } else if (typeof val === 'string') {
+            var preview = val.length > 40 ? val.substring(0, 40) + chalk.gray('...') : val;
+            valStr = chalk.green('"' + preview + '"');
+        } else if (typeof val === 'number') {
+            valStr = chalk.yellow(String(val));
+        } else if (typeof val === 'boolean') {
+            valStr = chalk.yellow(String(val));
+        } else if (typeof val === 'object') {
+            valStr = chalk.cyan(JSON.stringify(val).substring(0, 50));
+        } else {
+            valStr = chalk.yellow(String(val));
+        }
+
+        var keyStr = chalk.white(key.padEnd(14));
+        console.log('   \u{1F4CC} ' + keyStr + emoji + ' ' + valStr);
+    });
 }
 
 // ═══════════════════════════════════════════════════════════════
 // DETAIL LINES — Tree-structured sub-entries
 // ═══════════════════════════════════════════════════════════════
 
-/**
- * Single detail line with tree connector
- * @param {string} type - Detail type for emoji (e.g. 'data', 'user', 'hero')
- * @param {string} key - Key name
- * @param {string} value - Value to display
- * @param {boolean} isLast - Whether this is the last item in the group
- */
 function detail(type, key, value, isLast) {
     if (LEVELS.DEBUG.priority < MIN_PRIORITY && type !== 'important' && type !== 'warn' && type !== 'error') return;
-    const emoji = DETAILS[type] || DETAILS.data;
-    const connector = isLast ? '\u2514' : '\u251C';
-    const line = `${chalk.dim(key + ':')} ${chalk.white(String(value))}`;
-    console.log(`  ${connector} ${emoji} ${line}`);
+    var connector = isLast ? '\u2514' : '\u251C';
+    var line = chalk.dim(key + ': ') + chalk.white(String(value));
+    console.log('   ' + connector + ' ' + line);
 }
 
-/**
- * Multi-detail with automatic tree connectors
- * @param {string} type - Detail type for emoji
- * @param  {...[string, string]} pairs - Array of [key, value] pairs
- */
-function details(type, ...pairs) {
+function details(type /*, ...pairs */) {
     if (LEVELS.DEBUG.priority < MIN_PRIORITY && type !== 'important' && type !== 'warn' && type !== 'error') return;
-    const emoji = DETAILS[type] || DETAILS.data;
-    pairs.forEach((p, i) => {
-        const isLast = (i === pairs.length - 1);
-        const connector = isLast ? '\u2514' : '\u251C';
+    var pairs = Array.prototype.slice.call(arguments, 1);
+    pairs.forEach(function(p, i) {
+        var isLast = (i === pairs.length - 1);
+        var connector = isLast ? '\u2514' : '\u251C';
         if (Array.isArray(p)) {
-            const line = `${chalk.dim(p[0] + ':')} ${chalk.white(String(p[1]))}`;
-            console.log(`  ${connector} ${emoji} ${line}`);
+            var line = chalk.dim(p[0] + ': ') + chalk.white(String(p[1]));
+            console.log('   ' + connector + ' ' + line);
         } else {
-            console.log(`  ${connector} ${emoji} ${chalk.dim(String(p))}`);
+            console.log('   ' + connector + ' ' + chalk.dim(String(p)));
         }
     });
 }
 
 // ═══════════════════════════════════════════════════════════════
-// BOX SECTION — Visual grouping for related data
+// v4.0 — PASS / FAIL LINE (single result with emoji)
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * Open a box section with optional border color
- * @param {string} title - Section title (e.g. 'STARTER HERO', 'CURRENCY')
- * @param {string} emoji - Optional emoji prefix
- * @param {Function} borderColor - chalk color function for border (default: magenta)
+ * Single pass/fail line with emoji.
+ * @param {boolean} pass      - true=pass, false=fail
+ * @param {string} fieldName - Field name
+ * @param {*}      actual    - Actual value
+ * @param {string} [expectedType] - Expected type (for fail)
+ * @param {object} [opts]
+ * @param {string} [opts.impact]  - Impact explanation
+ * @param {string} [opts.fix]     - Fix suggestion
+ * @param {string} [opts.source]  - Source reference
  */
-function boxOpen(title, emoji, borderColor) {
-    const prefix = emoji ? emoji + ' ' : '';
-    const label = prefix + title;
-    const bc = borderColor || chalk.magenta;
-    const width = BOX_WIDTH;
-    console.log('');
-    console.log(`  \u250C ${bc.bold(label)} ${chalk.gray('\u2500'.repeat(Math.max(1, width - label.length - 1)))}\u2510`);
+function assertLine(pass, fieldName, actual, expectedType, opts) {
+    if (pass) {
+        console.log('   \u2705 ' + chalk.white(fieldName) + '  ' +
+                    chalk.dim('\u{1F4DD} ' + typeof actual) + '  \u2192 ' + chalk.green('OK'));
+    } else {
+        var typeEmoji = DATA_EMOJI[typeof actual] || '\u{1F522}';
+        var expEmoji = DATA_EMOJI[expectedType] || '\u{1F4DD}';
+        console.log('   \u26A0\u{FE0F}  ' + chalk.white(fieldName) + '  ' +
+                    typeEmoji + ' ' + chalk.yellow(typeof actual) +
+                    '  \u2192 expected ' + expEmoji + ' ' + chalk.white(expectedType));
+        if (opts) {
+            if (opts.impact) console.log('       \u{1F4CE} impact : ' + chalk.white(opts.impact));
+            if (opts.fix)    console.log('       \u{1F527} fix    : ' + chalk.white(opts.fix));
+            if (opts.source) console.log('       \u{1F4CE} source : ' + chalk.white(opts.source));
+        }
+    }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// v4.0 — SECTION SEPARATOR (within handler, thin themed lines)
+// ═══════════════════════════════════════════════════════════════
+
 /**
- * Open a colored box section — green for success, yellow for warn, red for error
+ * Thin section separator with emoji label.
+ * Used for sub-sections within a handler (e.g. STARTER HERO, CURRENCY).
+ * @param {string} emoji - Section emoji (e.g. '\u{1F9B8}')
  * @param {string} title - Section title
- * @param {string} emoji - Optional emoji prefix
- * @param {string} type - 'success' | 'warn' | 'error' | 'info' | 'debug'
  */
+function sectionLine(emoji, title) {
+    var label = ' ' + emoji + ' ' + chalk.white.bold(title) + ' ';
+    var sideLen = Math.max(1, Math.floor((BOX_WIDTH - label.length) / 2));
+    console.log('   ' + chalk.magenta('\u2501'.repeat(sideLen)) + chalk.dim(label) + chalk.magenta('\u2501'.repeat(sideLen)));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// BOX SECTION (legacy compat)
+// ═══════════════════════════════════════════════════════════════
+
+function boxOpen(title, emoji, borderColor) {
+    var prefix = emoji ? emoji + ' ' : '';
+    var label = prefix + title;
+    var bc = borderColor || chalk.magenta;
+    console.log('');
+    console.log('  \u250C ' + bc.bold(label) + ' ' + chalk.gray('\u2500'.repeat(Math.max(1, BOX_WIDTH - label.length - 1))) + '\u2510');
+}
+
 function colorBox(title, emoji, type) {
-    const colorMap = {
-        success: chalk.green,
-        warn: chalk.yellow,
-        error: chalk.red,
-        info: chalk.cyan,
-        debug: chalk.blue,
+    var colorMap = {
+        success: chalk.green, warn: chalk.yellow, error: chalk.red,
+        info: chalk.cyan, debug: chalk.blue,
     };
-    const bc = colorMap[type] || chalk.magenta;
-    boxOpen(title, emoji, bc);
-    return bc;
+    boxOpen(title, emoji, colorMap[type] || chalk.magenta);
+    return colorMap[type] || chalk.magenta;
 }
 
-/**
- * Add a line inside a box section
- * @param {string} content - The content to display
- * @param {string} emoji - Optional emoji prefix
- */
 function boxLine(content, emoji) {
-    const prefix = emoji ? emoji + ' ' : '  ';
-    console.log(`  \u2502 ${prefix}${content}`);
+    var prefix = emoji ? emoji + ' ' : '  ';
+    console.log('  \u2502 ' + prefix + content);
 }
 
-/**
- * Add a key=value line inside a box section
- * @param {string} key - Key name
- * @param {string} value - Value to display
- * @param {string} emoji - Optional emoji prefix
- * @param {boolean} isLast - Whether this is the last boxLine before boxClose
- */
 function boxDetail(key, value, emoji, isLast) {
-    const prefix = emoji ? emoji + ' ' : '  ';
-    const connector = isLast ? '\u2514' : '\u2502';
-    console.log(`  ${connector} ${prefix}${chalk.dim(key + ':')} ${chalk.white(String(value))}`);
+    var prefix = emoji ? emoji + ' ' : '  ';
+    var connector = isLast ? '\u2514' : '\u2502';
+    console.log('  ' + connector + ' ' + prefix + chalk.dim(key + ': ') + chalk.white(String(value)));
 }
 
-/**
- * Add a highlighted value line inside a box (value is colored)
- * @param {string} key - Key name
- * @param {string} value - Value to display (will be colored)
- * @param {string} emoji - Optional emoji prefix
- * @param {string} valueColor - 'green' | 'yellow' | 'red' | 'cyan' | 'magenta'
- * @param {boolean} isLast - Whether this is the last line
- */
 function boxHighlight(key, value, emoji, valueColor, isLast) {
-    const prefix = emoji ? emoji + ' ' : '  ';
-    const connector = isLast ? '\u2514' : '\u2502';
-    const colorMap = {
-        green: chalk.green,
-        yellow: chalk.yellow,
-        red: chalk.red,
-        cyan: chalk.cyan,
-        magenta: chalk.magenta,
-        white: chalk.white.bold,
+    var prefix = emoji ? emoji + ' ' : '  ';
+    var connector = isLast ? '\u2514' : '\u2502';
+    var colorMap = {
+        green: chalk.green, yellow: chalk.yellow, red: chalk.red,
+        cyan: chalk.cyan, magenta: chalk.magenta, white: chalk.white.bold,
     };
-    const vc = colorMap[valueColor] || chalk.white;
-    console.log(`  ${connector} ${prefix}${chalk.dim(key + ':')} ${vc(String(value))}`);
+    var vc = colorMap[valueColor] || chalk.white;
+    console.log('  ' + connector + ' ' + prefix + chalk.dim(key + ': ') + vc(String(value)));
 }
 
-/**
- * Close a box section
- */
 function boxClose() {
-    console.log(`  \u2514${chalk.gray('\u2500'.repeat(BOX_WIDTH))}\u2518`);
+    console.log('  \u2514' + chalk.gray('\u2500'.repeat(BOX_WIDTH)) + '\u2518');
     console.log('');
 }
 
 // ═══════════════════════════════════════════════════════════════
-// TRACE REFERENCE — Show main.min.js code trace
+// TRACE REFERENCE
 // ═══════════════════════════════════════════════════════════════
 
-/**
- * Show a code trace reference line (for reverse engineering)
- * @param {string} location - Code location (e.g. 'L5319', 'L134098')
- * @param {string} description - What the code does
- * @param {string} consumer - Which client function consumes this data
- */
 function traceRef(location, description, consumer) {
     if (LEVELS.DEBUG.priority < MIN_PRIORITY) return;
-    const loc = chalk.magenta.bold(location);
-    const desc = chalk.white(description);
-    const cons = consumer ? chalk.dim(`\u2192 ${consumer}`) : '';
-    console.log(`  \u2502 ${chalk.dim('\u{1F4C4} TRACE')} ${loc}  ${desc} ${cons}`);
+    var loc = chalk.magenta.bold(location);
+    var desc = chalk.white(description);
+    var cons = consumer ? chalk.dim(' \u2192 ' + consumer) : '';
+    console.log('  \u2502 ' + chalk.dim('\u{1F4C4} TRACE ') + loc + '  ' + desc + cons);
 }
 
-/**
- * Show trace reference inside a box (as boxLine)
- * @param {string} location - Code location
- * @param {string} description - What the code does
- */
 function boxTrace(location, description) {
     if (LEVELS.DEBUG.priority < MIN_PRIORITY) return;
-    const loc = chalk.magenta.bold(location);
-    const desc = chalk.gray(description);
-    console.log(`  \u2502 \u{1F4C4} ${loc}  ${desc}`);
+    var loc = chalk.magenta.bold(location);
+    var desc = chalk.gray(description);
+    console.log('  \u2502 \u{1F4C4} ' + loc + '  ' + desc);
 }
 
 // ═══════════════════════════════════════════════════════════════
-// OBJECT TREE — Pretty-print nested object
+// OBJECT TREE / DATA PREVIEW (legacy compat)
 // ═══════════════════════════════════════════════════════════════
 
-/**
- * Display object structure as a tree with type info
- * @param {object} obj - Object to display
- * @param {string} label - Section label
- * @param {number} maxKeys - Max keys to show (default 15)
- * @param {number} maxDepth - Max nesting depth (default 1)
- */
 function objectTree(obj, label, maxKeys, maxDepth) {
     if (LEVELS.DEBUG.priority < MIN_PRIORITY) return;
     if (!obj || typeof obj !== 'object') {
-        console.log(`  \u2514 ${DETAILS.data} ${chalk.gray(label)} = ${chalk.white(String(obj))}`);
+        console.log('  \u2514 \u{1F4CB} ' + chalk.gray(label) + ' = ' + chalk.white(String(obj)));
         return;
     }
-
-    const keys = Object.keys(obj);
-    const total = keys.length;
-    const show = Math.min(total, maxKeys || 15);
-
-    console.log(`  \u251C ${DETAILS.field} ${chalk.magenta(label)} ${chalk.gray(`{${total} keys}`)}`);
-
-    keys.slice(0, show).forEach((key, i) => {
-        const isLast = (i === show - 1) && (show >= total);
-        const connector = isLast ? '\u2514' : '\u2502';
-        const val = obj[key];
-
-        let typeStr;
-        if (val === null) {
-            typeStr = chalk.gray('null');
-        } else if (val === undefined) {
-            typeStr = chalk.gray('undefined');
-        } else if (Array.isArray(val)) {
-            typeStr = chalk.cyan(`Array[${val.length}]`);
-        } else if (typeof val === 'object') {
-            const subKeys = Object.keys(val).length;
-            typeStr = chalk.cyan(`Object{${subKeys}}`);
-        } else if (typeof val === 'boolean') {
-            typeStr = chalk.yellow(String(val));
-        } else if (typeof val === 'number') {
-            typeStr = chalk.yellow(String(val));
-        } else if (typeof val === 'string') {
-            const preview = val.length > 28 ? val.substring(0, 28) + '...' : val;
-            typeStr = chalk.green(`"${preview}"`);
-        } else {
-            typeStr = chalk.gray(typeof val);
-        }
-
-        const keyStr = chalk.white(key.padEnd(28));
-        console.log(`  ${connector}   ${keyStr} ${typeStr}`);
+    var keys = Object.keys(obj);
+    var total = keys.length;
+    var show = Math.min(total, maxKeys || 15);
+    console.log('  \u251C \u{1F4D1} ' + chalk.magenta(label) + ' ' + chalk.gray('{' + total + ' keys}'));
+    keys.slice(0, show).forEach(function(key, i) {
+        var isLast = (i === show - 1) && (show >= total);
+        var connector = isLast ? '\u2514' : '\u2502';
+        var val = obj[key];
+        var typeStr;
+        if (val === null) typeStr = chalk.gray('null');
+        else if (val === undefined) typeStr = chalk.gray('undefined');
+        else if (Array.isArray(val)) typeStr = chalk.cyan('Array[' + val.length + ']');
+        else if (typeof val === 'object') typeStr = chalk.cyan('Object{' + Object.keys(val).length + '}');
+        else if (typeof val === 'boolean') typeStr = chalk.yellow(String(val));
+        else if (typeof val === 'number') typeStr = chalk.yellow(String(val));
+        else if (typeof val === 'string') {
+            var p = val.length > 28 ? val.substring(0, 28) + '...' : val;
+            typeStr = chalk.green('"' + p + '"');
+        } else typeStr = chalk.gray(typeof val);
+        console.log('  ' + connector + '   ' + chalk.white(key.padEnd(28)) + ' ' + typeStr);
     });
+    if (total > show) console.log('  \u2514   ' + chalk.gray('... +' + (total - show) + ' more keys'));
+}
 
-    if (total > show) {
-        console.log(`  \u2514   ${chalk.gray(`... +${total - show} more keys`)}`);
-    }
+function dataPreview(label, data, maxDepth) {
+    objectTree(data, label, 10, maxDepth);
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SECTION HEADERS
+// SECTION HEADERS (legacy compat)
 // ═══════════════════════════════════════════════════════════════
 
-/** Main section header — bold box */
 function header(title) {
     console.log('');
-    const width = BOX_WIDTH + 2;
-    const inner = title.padEnd(width - 4);
-    console.log(chalk.magenta(`  \u2554${'\u2550'.repeat(width)}\u2557`));
+    var width = BOX_WIDTH + 2;
+    var inner = title.padEnd(width - 4);
+    console.log(chalk.magenta('  \u2554' + '\u2550'.repeat(width) + '\u2557'));
     console.log(chalk.magenta('  \u2551') + chalk.magenta.bold('  ' + inner + '  ') + chalk.magenta('\u2551'));
-    console.log(chalk.magenta(`  \u255A${'\u2550'.repeat(width)}\u255D`));
+    console.log(chalk.magenta('  \u255A' + '\u2550'.repeat(width) + '\u255D'));
     console.log('');
 }
 
-/** Thin separator header */
 function headerThin(title) {
     console.log('');
     console.log(chalk.magenta('  \u250C\u2500 ' + title + ' ' + '\u2500'.repeat(Math.max(1, 52 - title.length)) + '\u2510'));
     console.log('');
 }
 
-/** Section end — double line */
 function headerEnd() {
     console.log('');
-    console.log(chalk.gray('  \u2500'.repeat(30)));
+    console.log(chalk.gray('  ' + '\u2500'.repeat(30)));
     console.log('');
 }
 
-/** Sub-section divider with emoji */
 function subHeader(emoji, title) {
     console.log('');
-    console.log(`  ${emoji} ${chalk.white.bold(title)}`);
+    console.log('  ' + emoji + ' ' + chalk.white.bold(title));
     console.log(chalk.gray('  ' + '\u2500'.repeat(54)));
 }
 
-// ═══════════════════════════════════════════════════════════════
-// SEPARATOR — Visual divider
-// ═══════════════════════════════════════════════════════════════
-
 function separator(char) {
-    const c = char || '\u2500';
+    var c = char || '\u2500';
     console.log(chalk.gray('  ' + c.repeat(BOX_WIDTH)));
 }
 
-/** Double separator for emphasis */
 function separatorDouble() {
     console.log(chalk.gray('  \u2550'.repeat(BOX_WIDTH)));
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SOCKET EVENT — Connection lifecycle
+// SOCKET EVENT
 // ═══════════════════════════════════════════════════════════════
 
 function socketEvent(event, socketId, ip, transport, extra) {
-    const sid = socketId ? chalk.white(socketId.substring(0, 8)) + chalk.gray('...') : chalk.gray('?');
+    var sid = socketId ? chalk.white(socketId.substring(0, 8)) + chalk.gray('...') : chalk.gray('?');
 
     if (event === 'connect') {
         console.log('');
-        console.log(chalk.green.bold('  \u2795 NEW CONNECTION') + chalk.gray(' \u2500'.repeat(42)));
-        details('session',
-            ['id', socketId],
-            ['ip', ip],
-            ['transport', transport]
-        );
+        console.log(chalk.green.bold('  \u{1F517}\u26A1 Client connected  ') + sid + chalk.gray('  \u{1F4CD} ' + ip + '  \u{1F4E1} ' + transport));
     } else if (event === 'disconnect') {
-        console.log('');
-        console.log(chalk.red.bold('  \u2796 DISCONNECT') + chalk.gray(' \u2500'.repeat(46)));
-        console.log(`  \u2514 ${DETAILS.session} ${chalk.dim('reason:')} ${chalk.white(extra || '?')}  ${chalk.dim('sid=')} ${sid}`);
+        console.log(chalk.red.bold('  \u2796 Disconnected  ') + sid + chalk.gray('  reason: ' + (extra || '?')));
+    } else if (event === 'upgrade') {
+        console.log(chalk.cyan('  \u{1F504}\u2197\uFE0F Upgrade  ') + chalk.white(extra || '') + '  \u{1F7E2}');
     } else {
-        console.log(`  \u2502 ${chalk.cyan(event.padEnd(14))} ${chalk.dim('sid=')} ${sid}  ${chalk.dim('ip=')} ${chalk.white(ip)}  ${chalk.dim('tp=')} ${transport}`);
-        if (extra) {
-            console.log(`  \u2514 ${chalk.dim(extra)}`);
-        }
+        console.log('  \u2502 ' + chalk.cyan(event.padEnd(14)) + ' ' + sid + '  ' + ip + '  ' + transport);
+        if (extra) console.log('  \u2514 ' + chalk.dim(extra));
     }
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ACTION LOG — Request/Response flow
+// ACTION LOG
 // ═══════════════════════════════════════════════════════════════
 
 function actionLog(direction, action, status, err, extra) {
     if (direction === 'req') {
         console.log('');
-        console.log(`  \u{1F4E4} ${chalk.bold.cyan(action.padEnd(22))} ${chalk.gray('\u2500'.repeat(34))}`);
+        console.log('  \u{1F4E4} ' + chalk.bold.cyan(action.padEnd(22)) + chalk.gray(' ' + '\u2500'.repeat(34)));
     } else {
-        const statusEmoji = status === 'OK' ? '\u2705' : '\u274C';
-        const statusColor = status === 'OK' ? chalk.green : chalk.red;
-        const barColor = status === 'OK' ? chalk.green : chalk.red;
-        console.log(`${statusEmoji} ${chalk.cyan(action.padEnd(22))} ${statusColor(status.padEnd(6))} ${barColor('\u2500'.repeat(28))}`);
-        if (extra) {
-            console.log(`  \u2514 ${chalk.dim(extra)}`);
-        }
+        var statusEmoji = status === 'OK' ? '\u2705' : '\u274C';
+        var statusColor = status === 'OK' ? chalk.green : chalk.red;
+        console.log(statusEmoji + ' ' + chalk.cyan(action.padEnd(22)) + ' ' + statusColor(status.padEnd(6)) + ' ' + statusColor('\u2500'.repeat(28)));
+        if (extra) console.log('  \u2514 ' + chalk.dim(extra));
     }
 }
 
 // ═══════════════════════════════════════════════════════════════
-// PERFORMANCE — Timing with visual bar
+// TIMING
 // ═══════════════════════════════════════════════════════════════
 
 function timing(label, startTimeMs) {
-    const elapsed = Date.now() - startTimeMs;
-    const color = elapsed > 2000 ? chalk.red : elapsed > 1000 ? chalk.yellow : elapsed > 500 ? chalk.cyan : chalk.green;
-    const barCount = Math.min(Math.floor(elapsed / 100), 20);
-    const bar = elapsed > 100 ? '\u2588'.repeat(barCount) : '';
-    const barColor = elapsed > 2000 ? chalk.red : elapsed > 1000 ? chalk.yellow : chalk.green;
-    console.log(`  \u2514 ${DETAILS.duration} ${chalk.dim(label + ':')} ${color(elapsed + 'ms')} ${barColor(bar)}`);
+    var elapsed = Date.now() - startTimeMs;
+    var color = elapsed > 2000 ? chalk.red : elapsed > 1000 ? chalk.yellow : elapsed > 500 ? chalk.cyan : chalk.green;
+    var barCount = Math.min(Math.floor(elapsed / 100), 20);
+    var bar = elapsed > 100 ? '\u2588'.repeat(barCount) : '';
+    var barColor = elapsed > 2000 ? chalk.red : elapsed > 1000 ? chalk.yellow : chalk.green;
+    console.log('  \u2514 \u23F1\uFE0F ' + chalk.dim(label + ': ') + color(elapsed + 'ms') + ' ' + barColor(bar));
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ERROR WITH STACK
+// ERROR WITH STACK (legacy compat)
 // ═══════════════════════════════════════════════════════════════
 
 function errorWithStack(module, message, err) {
     console.log('');
-    console.log(chalk.red.bold('  \u274C ERROR: ' + module) + chalk.gray(' \u2500'.repeat(46)));
-    console.log(`  \u251C ${DETAILS.error} ${chalk.dim('msg:')} ${chalk.white(message)}`);
+    console.log(chalk.red.bold('  \u274C ERROR: ' + module) + chalk.gray(' ' + '\u2500'.repeat(46)));
+    console.log('  \u251C \u274C ' + chalk.dim('msg: ') + chalk.white(message));
     if (err) {
-        console.log(`  \u251C ${DETAILS.error} ${chalk.dim('err:')} ${chalk.red(err.message)}`);
+        console.log('  \u251C \u274C ' + chalk.dim('err: ') + chalk.red(err.message));
         if (err.stack) {
             console.log(chalk.gray('  \u250C' + '\u2500'.repeat(56) + '\u2510'));
-            err.stack.split('\n').slice(1, 6).forEach((line, i) => {
-                const prefix = i < 4 ? chalk.gray('\u2502') : chalk.gray('\u2514');
-                const suffix = i < 4 ? chalk.gray('\u2502') : '';
-                console.log(`  ${prefix} ${chalk.gray(line.trim().padEnd(56))} ${suffix}`);
+            err.stack.split('\n').slice(1, 6).forEach(function(line, i) {
+                var prefix = i < 4 ? chalk.gray('\u2502') : chalk.gray('\u2514');
+                var suffix = i < 4 ? chalk.gray('\u2502') : '';
+                console.log('  ' + prefix + ' ' + chalk.gray(line.trim().padEnd(56)) + ' ' + suffix);
             });
             if (err.stack.split('\n').length > 6) {
-                console.log(`  ${chalk.gray('\u2502')} ${chalk.gray('... more stack lines ...'.padEnd(56))} ${chalk.gray('\u2502')}`);
+                console.log('  ' + chalk.gray('\u2502') + ' ' + chalk.gray('... more stack lines ...'.padEnd(56)) + ' ' + chalk.gray('\u2502'));
             }
             console.log(chalk.gray('  \u2514' + '\u2500'.repeat(56) + '\u2518'));
         }
@@ -519,636 +808,329 @@ function errorWithStack(module, message, err) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// REQUEST DUMP — Full request data in box
+// REQUEST DUMP (legacy compat)
 // ═══════════════════════════════════════════════════════════════
 
 function requestDump(request) {
     if (LEVELS.DEBUG.priority < MIN_PRIORITY) return;
     if (!request || typeof request !== 'object') return;
-
-    const keys = Object.keys(request);
+    var keys = Object.keys(request);
     console.log('');
     console.log(chalk.gray('  \u250C' + '\u2500'.repeat(56) + '\u2510'));
     console.log(chalk.gray('  \u2502') + chalk.white.bold('  \u{1F4E4} REQUEST PAYLOAD'.padEnd(58)) + chalk.gray('\u2502'));
     console.log(chalk.gray('  \u251C' + '\u2500'.repeat(56) + '\u2524'));
-
-    keys.forEach((key, i) => {
-        const isLast = (i === keys.length - 1);
-        const val = request[key];
-        const connector = isLast ? '\u2514' : '\u2502';
-        let valStr;
+    keys.forEach(function(key, i) {
+        var isLast = (i === keys.length - 1);
+        var val = request[key];
+        var connector = isLast ? '\u2514' : '\u2502';
+        var valStr;
         if (val === null) valStr = chalk.gray('null');
         else if (val === undefined) valStr = chalk.gray('undefined');
         else if (typeof val === 'string') {
-            const preview = val.length > 40 ? val.substring(0, 40) + chalk.gray('...') : val;
-            valStr = chalk.green(`"${preview}"`);
-        } else if (typeof val === 'object') {
-            valStr = chalk.cyan(JSON.stringify(val).substring(0, 50));
-        } else {
-            valStr = chalk.yellow(String(val));
-        }
-        console.log(`  ${connector}   ${chalk.white(key.padEnd(20))} ${valStr}`);
+            var preview = val.length > 40 ? val.substring(0, 40) + chalk.gray('...') : val;
+            valStr = chalk.green('"' + preview + '"');
+        } else if (typeof val === 'object') valStr = chalk.cyan(JSON.stringify(val).substring(0, 50));
+        else valStr = chalk.yellow(String(val));
+        console.log('  ' + connector + '   ' + chalk.white(key.padEnd(20)) + ' ' + valStr);
     });
-
     console.log(chalk.gray('  \u2514' + '\u2500'.repeat(56) + '\u2518'));
 }
 
 // ═══════════════════════════════════════════════════════════════
-// RESPONSE SUMMARY — Response metrics
+// RESPONSE SUMMARY (legacy compat)
 // ═══════════════════════════════════════════════════════════════
 
 function responseSummary(ret, dataLen, compressed, duration) {
-    const status = ret === 0 ? chalk.green.bold('\u2705 SUCCESS') : chalk.red.bold(`\u274C ERROR(${ret})`);
-    const comp = compressed ? chalk.green('LZ-STRING') : chalk.gray('RAW');
-    const durColor = duration > 2000 ? chalk.red : duration > 1000 ? chalk.yellow : chalk.green;
-
+    var status = ret === 0 ? chalk.green.bold('\u2705 SUCCESS') : chalk.red.bold('\u274C ERROR(' + ret + ')');
+    var comp = compressed ? chalk.green('LZ-STRING') : chalk.gray('RAW');
+    var durColor = duration > 2000 ? chalk.red : duration > 1000 ? chalk.yellow : chalk.green;
     console.log('');
-    console.log(`  ${status}  ${chalk.dim('\u{1F4CF} data=')} ${chalk.white(dataLen + ' chars')}  ${chalk.dim('\u{1F4E6} proto=')} ${comp}  ${chalk.dim('\u{23F1}\u{FE0F} time=')} ${durColor(duration + 'ms')}`);
+    console.log('  ' + status + '  ' + chalk.dim('\u{1F4CF} data= ') + chalk.white(dataLen + ' chars') +
+                '  ' + chalk.dim('\u{1F4E6} proto= ') + comp + '  ' + chalk.dim('\u23F1\uFE0F time= ') + durColor(duration + 'ms'));
     console.log('');
 }
 
 // ═══════════════════════════════════════════════════════════════
-// DATA PREVIEW — Show object structure summary
-// ═══════════════════════════════════════════════════════════════
-
-function dataPreview(label, data, maxDepth = 1) {
-    if (LEVELS.DEBUG.priority < MIN_PRIORITY) return;
-    if (!data || typeof data !== 'object') {
-        console.log(`  \u2514 ${DETAILS.data} ${chalk.gray(label)} = ${chalk.white(String(data))}`);
-        return;
-    }
-
-    const keys = Object.keys(data);
-    const totalKeys = keys.length;
-    console.log(`  \u251C ${DETAILS.field} ${chalk.magenta(label)} ${chalk.gray(`{${totalKeys} keys}`)}`);
-
-    if (maxDepth <= 0) return;
-
-    const showCount = Math.min(totalKeys, 10);
-    keys.slice(0, showCount).forEach((key, i) => {
-        const isLast = (i === showCount - 1) && (showCount >= totalKeys);
-        const connector = isLast ? '\u2514' : '\u2502';
-        const val = data[key];
-
-        if (val === null) {
-            console.log(`  ${connector}   ${chalk.white(key)}: ${chalk.gray('null')}`);
-        } else if (val === undefined) {
-            console.log(`  ${connector}   ${chalk.white(key)}: ${chalk.gray('undefined')}`);
-        } else if (Array.isArray(val)) {
-            console.log(`  ${connector}   ${chalk.white(key)}: ${chalk.cyan(`Array[${val.length}]`)}`);
-        } else if (typeof val === 'object') {
-            const subKeys = Object.keys(val).length;
-            console.log(`  ${connector}   ${chalk.white(key)}: ${chalk.cyan(`{${subKeys}}`)}`);
-        } else if (typeof val === 'string') {
-            const preview = val.length > 30 ? val.substring(0, 30) + '...' : val;
-            console.log(`  ${connector}   ${chalk.white(key)}: ${chalk.green(`"${preview}"`)}`);
-        } else if (typeof val === 'boolean') {
-            console.log(`  ${connector}   ${chalk.white(key)}: ${chalk.yellow(String(val))}`);
-        } else {
-            console.log(`  ${connector}   ${chalk.white(key)}: ${chalk.yellow(String(val))}`);
-        }
-    });
-
-    if (totalKeys > showCount) {
-        console.log(`  \u2514   ${chalk.gray(`... +${totalKeys - showCount} more keys`)}`);
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// TABLE — Simple key=value table
+// TABLE / FIELD BUILD / FIELD MAP / CATEGORY BREAKDOWN (legacy)
 // ═══════════════════════════════════════════════════════════════
 
 function table(rows) {
     if (LEVELS.DEBUG.priority < MIN_PRIORITY) return;
     if (!rows || rows.length === 0) return;
-
-    const keyWidth = Math.max(...rows.map(r => String(r[0]).length)) + 2;
-
-    rows.forEach((row, i) => {
-        const isLast = (i === rows.length - 1);
-        const connector = isLast ? '\u2514' : '\u2502';
-        const key = chalk.white(String(row[0]).padEnd(keyWidth));
-        const val = typeof row[1] === 'number' ? chalk.yellow(String(row[1])) : chalk.cyan(String(row[1]));
-        console.log(`  ${connector} ${key} ${chalk.dim(':')} ${val}`);
+    var keyWidth = Math.max.apply(null, rows.map(function(r) { return String(r[0]).length; })) + 2;
+    rows.forEach(function(row, i) {
+        var isLast = (i === rows.length - 1);
+        var connector = isLast ? '\u2514' : '\u2502';
+        var key = chalk.white(String(row[0]).padEnd(keyWidth));
+        var val = typeof row[1] === 'number' ? chalk.yellow(String(row[1])) : chalk.cyan(String(row[1]));
+        console.log('  ' + connector + ' ' + key + ' ' + chalk.dim(': ') + val);
     });
 }
 
-// ═══════════════════════════════════════════════════════════════
-// FIELD BUILD LOG — Show each field being built
-// ═══════════════════════════════════════════════════════════════
-
 function fieldBuild(index, total, fieldName, fieldType, extra) {
     if (LEVELS.DEBUG.priority < MIN_PRIORITY) return;
-    const isLast = (index === total);
-    const num = chalk.gray(`[${String(index).padStart(2)}/${total}]`);
-    const connector = isLast ? '\u2514' : '\u2502';
-    const name = chalk.white(fieldName.padEnd(26));
-    const type = chalk.cyan(`(${fieldType})`.padEnd(24));
-    const info = extra ? chalk.gray(extra) : '';
-    console.log(`  ${connector} ${num} ${name} ${type} ${info}`);
+    var isLast = (index === total);
+    var num = chalk.gray('[' + String(index).padStart(2, '0') + '/' + total + ']');
+    var connector = isLast ? '\u2514' : '\u2502';
+    console.log('  ' + connector + ' ' + num + ' ' + chalk.white(fieldName.padEnd(26)) + ' ' + chalk.cyan('(' + fieldType + ')'.padEnd(24)) + ' ' + (extra ? chalk.gray(extra) : ''));
 }
-
-// ═══════════════════════════════════════════════════════════════
-// STEP LOG — Pipeline step indicator with visual bar
-// ═══════════════════════════════════════════════════════════════
-
-/**
- * Log a pipeline step with optional result
- * @param {number} current - Current step number
- * @param {number} total - Total steps
- * @param {string} description - Step description
- * @param {string} result - Result: 'ok', 'fail', 'warn', 'new', 'skip', 'running'
- * @param {string} extra - Extra detail text
- */
-function step(current, total, description, result, extra) {
-    const num = chalk.gray(`[${String(current).padStart(2)}/${String(total).padStart(2)}]`);
-
-    let icon, color;
-    if (result === 'ok' || result === 'pass') {
-        icon = '\u2705';
-        color = chalk.green;
-    } else if (result === 'fail') {
-        icon = '\u274C';
-        color = chalk.red;
-    } else if (result === 'warn') {
-        icon = '\u{26A0}\u{FE0F}';
-        color = chalk.yellow;
-    } else if (result === 'new') {
-        icon = '\u{1F31F}';
-        color = chalk.magenta;
-    } else if (result === 'skip') {
-        icon = '\u23ED';
-        color = chalk.gray;
-    } else if (result === 'running') {
-        icon = '\u{1F504}';
-        color = chalk.cyan;
-    } else {
-        icon = '\u{1F504}';
-        color = chalk.cyan;
-    }
-
-    // Visual progress bar
-    let bar;
-    if (result === 'fail' || result === 'skip') {
-        // ALL empty blocks — nothing filled, makes fail/skip very visible
-        bar = chalk.gray('\u2591'.repeat(total));
-    } else if (result === 'warn') {
-        // Completed up to this step, rest empty — warning highlight
-        const filled = '\u2588'.repeat(current - 1);
-        const warnBlock = chalk.yellow('\u2588');
-        const empty = '\u2591'.repeat(total - current);
-        bar = chalk.green(filled) + warnBlock + chalk.gray(empty);
-    } else if (result === 'running') {
-        const filled = '\u2588'.repeat(current - 1);
-        const empty = '\u2591'.repeat(total - current);
-        bar = chalk.gray(filled) + chalk.cyan('\u2588') + chalk.gray(empty);
-    } else {
-        // ok, pass, new — all completed steps green
-        const filled = '\u2588'.repeat(current);
-        const empty = '\u2591'.repeat(total - current);
-        bar = chalk.green(filled) + chalk.gray(empty);
-    }
-
-    const desc = color(description);
-    const extraStr = extra ? chalk.dim('  ' + extra) : '';
-
-    console.log(`  ${num} ${icon} ${desc}  ${bar}${extraStr}`);
-}
-
-// ═══════════════════════════════════════════════════════════════
-// FIELD MAP — Compact list of all fields with type/size info
-// ═══════════════════════════════════════════════════════════════
 
 function fieldMap(data, label) {
     if (LEVELS.DEBUG.priority < MIN_PRIORITY) return;
     if (!data || typeof data !== 'object') return;
-
-    const keys = Object.keys(data);
-    const total = keys.length;
-
+    var keys = Object.keys(data);
     boxOpen(label || 'DATA CONSTRUCTION', '\u{1F3D7}\u{FE0F}');
-
-    keys.forEach((key, i) => {
-        const val = data[key];
-        const isLast = (i === total - 1);
-        const connector = isLast ? '\u2514' : '\u2502';
-
-        let typeInfo;
-        if (val === null) {
-            typeInfo = chalk.gray('null');
-        } else if (val === undefined) {
-            typeInfo = chalk.gray('undefined');
-        } else if (Array.isArray(val)) {
-            typeInfo = chalk.cyan(`Array[${val.length}]`);
-        } else if (typeof val === 'object') {
-            const subKeys = Object.keys(val).length;
-            typeInfo = chalk.cyan(`Object{${subKeys}}`);
-        } else if (typeof val === 'boolean') {
-            typeInfo = chalk.yellow(String(val));
-        } else if (typeof val === 'number') {
-            typeInfo = chalk.yellow(String(val));
-        } else if (typeof val === 'string') {
-            const preview = val.length > 25 ? val.substring(0, 25) + '...' : val;
-            typeInfo = chalk.green(`"${preview}"`);
-        } else {
-            typeInfo = chalk.gray(typeof val);
-        }
-
-        const keyStr = chalk.white(key.padEnd(28));
-        console.log(`  ${connector}   ${keyStr} ${typeInfo}`);
+    keys.forEach(function(key, i) {
+        var val = data[key];
+        var isLast = (i === keys.length - 1);
+        var connector = isLast ? '\u2514' : '\u2502';
+        var typeInfo;
+        if (val === null) typeInfo = chalk.gray('null');
+        else if (val === undefined) typeInfo = chalk.gray('undefined');
+        else if (Array.isArray(val)) typeInfo = chalk.cyan('Array[' + val.length + ']');
+        else if (typeof val === 'object') typeInfo = chalk.cyan('Object{' + Object.keys(val).length + '}');
+        else if (typeof val === 'boolean') typeInfo = chalk.yellow(String(val));
+        else if (typeof val === 'number') typeInfo = chalk.yellow(String(val));
+        else if (typeof val === 'string') {
+            var p = val.length > 25 ? val.substring(0, 25) + '...' : val;
+            typeInfo = chalk.green('"' + p + '"');
+        } else typeInfo = chalk.gray(typeof val);
+        console.log('  ' + connector + '   ' + chalk.white(key.padEnd(28)) + ' ' + typeInfo);
     });
-
     boxClose();
 }
 
-// ═══════════════════════════════════════════════════════════════
-// CATEGORY COUNTER — Visual field category summary
-// ═══════════════════════════════════════════════════════════════
-
-/**
- * Show a visual category breakdown (for final summary)
- * @param {Array} categories - Array of [emoji, label, count, typeColor]
- */
 function categoryBreakdown(categories) {
     if (!categories || categories.length === 0) return;
-
-    const maxLabel = Math.max(...categories.map(c => String(c[1]).length));
-    categories.forEach((cat, i) => {
-        const isLast = (i === categories.length - 1);
-        const connector = isLast ? '\u2514' : '\u2502';
-        const emoji = cat[0] || DETAILS.data;
-        const label = chalk.white(String(cat[1]).padEnd(maxLabel));
-        const count = chalk.yellow(String(cat[2]));
-        const typeStr = cat[3] ? chalk.dim(`(${cat[3]})`) : '';
-        console.log(`  ${connector} ${emoji} ${label} ${count} fields ${typeStr}`);
+    var maxLabel = Math.max.apply(null, categories.map(function(c) { return String(c[1]).length; }));
+    categories.forEach(function(cat, i) {
+        var isLast = (i === categories.length - 1);
+        var connector = isLast ? '\u2514' : '\u2502';
+        var label = chalk.white(String(cat[1]).padEnd(maxLabel));
+        var count = chalk.yellow(String(cat[2]));
+        var typeStr = cat[3] ? chalk.dim(' (' + cat[3] + ')') : '';
+        console.log('  ' + connector + ' ' + (cat[0] || '\u{1F4CB}') + ' ' + label + ' ' + count + ' fields' + typeStr);
     });
 }
 
 // ═══════════════════════════════════════════════════════════════
-// v3.0 — ERROR BANNER — thin border, IMPOSSIBLE kelewat
-// Untuk error SILENT yang main-server biasanya sembunyikan.
+// STEP LOG — Pipeline step (legacy compat, now less used)
 // ═══════════════════════════════════════════════════════════════
 
-/**
- * Full-width ERROR BANNER — impossible to miss in any log output.
- * Use for CRITICAL errors that would otherwise be silent in the game server.
- *
- * @param {object} opts
- * @param {string} opts.module     - Module name (ENTER, BUILD, etc.)
- * @param {string} opts.step      - Step context e.g. '06/10 Circular Reference Check'
- * @param {string} opts.message   - What happened
- * @param {string} opts.trace     - main.min.js line reference e.g. 'L121387'
- * @param {string} opts.consumer  - Client function that consumes this data
- * @param {string} opts.impact    - What will happen if this error is ignored
- * @param {string} opts.fix       - What the server did to handle it
- * @param {Error}  [opts.err]     - Optional Error object for stack trace
- */
-function errorBanner(opts) {
-    const W = 62;
-    const r = chalk.red.bold;
-    const rb = chalk.red;
-    const w = chalk.white;
-    const g = chalk.gray;
-    const y = chalk.yellow;
-    const m = chalk.magenta;
+function step(current, total, description, result, extra) {
+    var num = chalk.gray('[' + String(current).padStart(2, '0') + '/' + String(total).padStart(2, '0') + ']');
+    var icon, color;
+    if (result === 'ok' || result === 'pass') { icon = '\u2705'; color = chalk.green; }
+    else if (result === 'fail') { icon = '\u274C'; color = chalk.red; }
+    else if (result === 'warn') { icon = '\u{26A0}\u{FE0F}'; color = chalk.yellow; }
+    else if (result === 'new') { icon = '\u{1F31F}'; color = chalk.magenta; }
+    else if (result === 'skip') { icon = '\u23ED'; color = chalk.gray; }
+    else if (result === 'running') { icon = '\u{1F504}'; color = chalk.cyan; }
+    else { icon = '\u{1F504}'; color = chalk.cyan; }
 
-    console.log('');
-    console.log(r('  ┌' + '─'.repeat(W) + '┐'));
-    if (opts.step)        console.log(r('  │') + '  ' + r('❌ FATAL ERROR AT STEP ' + opts.step) + rb(' '.repeat(Math.max(0, W - 26 - opts.step.length))) + r('│'));
-    console.log(rb('  │') + g(' '.repeat(W)) + rb('│'));
-    if (opts.module)      console.log(rb('  │') + '  ' + g('STEP:   ') + w(opts.module) + g(' '.repeat(Math.max(0, W - 10 - opts.module.length))) + rb('│'));
-    if (opts.message)     console.log(rb('  │') + '  ' + g('REASON: ') + w.bold(opts.message) + g(' '.repeat(Math.max(0, W - 10 - opts.message.length))) + rb('│'));
-    if (opts.trace)       console.log(rb('  │') + '  ' + g('DETAIL: ') + m.bold(opts.trace) + g(' '.repeat(Math.max(0, W - 10 - opts.trace.length))) + rb('│'));
-    if (opts.consumer)    console.log(rb('  │') + '  ' + g('CLIENT: ') + g(opts.consumer) + g(' '.repeat(Math.max(0, W - 10 - opts.consumer.length))) + rb('│'));
-    console.log(rb('  │') + g(' '.repeat(W)) + rb('│'));
-    if (opts.impact)      console.log(rb('  │') + '  ' + y('IMPACT:  ') + y.bold(opts.impact) + g(' '.repeat(Math.max(0, W - 10 - opts.impact.length))) + rb('│'));
-    if (opts.fix)         console.log(rb('  │') + '  ' + g('FIX:     ') + g(opts.fix) + g(' '.repeat(Math.max(0, W - 10 - opts.fix.length))) + rb('│'));
-    console.log(rb('  │') + g(' '.repeat(W)) + rb('│'));
-
-    // Stack trace inside banner
-    if (opts.err && opts.err.stack) {
-        const lines = opts.err.stack.split('\n').slice(1, 5);
-        lines.forEach((line, i) => {
-            const trimmed = line.trim().substring(0, W - 4);
-            const prefix = i < lines.length - 1 ? '  │  ' : '  └  ';
-            console.log(rb('  │') + '  ' + g(prefix + trimmed.padEnd(W - 4)) + rb('│'));
-        });
-        if (opts.err.stack.split('\n').length > 5) {
-            console.log(rb('  │') + '  ' + g('     ... more stack lines ...'.padEnd(W - 4)) + rb('│'));
-        }
-        console.log(rb('  │') + g(' '.repeat(W)) + rb('│'));
+    var bar;
+    if (result === 'fail' || result === 'skip') {
+        bar = chalk.gray('\u2591'.repeat(total));
+    } else if (result === 'warn') {
+        bar = chalk.green('\u2588'.repeat(current - 1)) + chalk.yellow('\u2588') + chalk.gray('\u2591'.repeat(total - current));
+    } else if (result === 'running') {
+        bar = chalk.gray('\u2588'.repeat(current - 1)) + chalk.cyan('\u2588') + chalk.gray('\u2591'.repeat(total - current));
+    } else {
+        bar = chalk.green('\u2588'.repeat(current)) + chalk.gray('\u2591'.repeat(total - current));
     }
 
-    console.log(r('  └' + '─'.repeat(W) + '┘'));
+    console.log('  ' + num + ' ' + icon + ' ' + color(description) + '  ' + bar + (extra ? chalk.dim('  ' + extra) : ''));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// ERROR BANNER (legacy compat, now used less)
+// ═══════════════════════════════════════════════════════════════
+
+function errorBanner(opts) {
+    var W = 62;
+    var r = chalk.red.bold, rb = chalk.red, w = chalk.white, g = chalk.gray, y = chalk.yellow, m = chalk.magenta;
+    console.log('');
+    console.log(r('  \u250C' + '\u2500'.repeat(W) + '\u2510'));
+    if (opts.step) console.log(r('  \u2502') + '  ' + r('\u274C FATAL ERROR AT STEP ' + opts.step) + rb(' '.repeat(Math.max(0, W - 26 - opts.step.length))) + r('\u2502'));
+    console.log(rb('  \u2502') + g(' '.repeat(W)) + rb('\u2502'));
+    if (opts.module)      console.log(rb('  \u2502') + '  ' + g('STEP:   ') + w(opts.module) + g(' '.repeat(Math.max(0, W - 10 - opts.module.length))) + rb('\u2502'));
+    if (opts.message)     console.log(rb('  \u2502') + '  ' + g('REASON: ') + w.bold(opts.message) + g(' '.repeat(Math.max(0, W - 10 - opts.message.length))) + rb('\u2502'));
+    if (opts.trace)       console.log(rb('  \u2502') + '  ' + g('DETAIL: ') + m.bold(opts.trace) + g(' '.repeat(Math.max(0, W - 10 - opts.trace.length))) + rb('\u2502'));
+    if (opts.consumer)    console.log(rb('  \u2502') + '  ' + g('CLIENT: ') + g(opts.consumer) + g(' '.repeat(Math.max(0, W - 10 - opts.consumer.length))) + rb('\u2502'));
+    console.log(rb('  \u2502') + g(' '.repeat(W)) + rb('\u2502'));
+    if (opts.impact)      console.log(rb('  \u2502') + '  ' + y('IMPACT:  ') + y.bold(opts.impact) + g(' '.repeat(Math.max(0, W - 10 - opts.impact.length))) + rb('\u2502'));
+    if (opts.fix)         console.log(rb('  \u2502') + '  ' + g('FIX:     ') + g(opts.fix) + g(' '.repeat(Math.max(0, W - 10 - opts.fix.length))) + rb('\u2502'));
+    console.log(rb('  \u2502') + g(' '.repeat(W)) + rb('\u2502'));
+    if (opts.err && opts.err.stack) {
+        var lines = opts.err.stack.split('\n').slice(1, 5);
+        lines.forEach(function(line, i) {
+            var trimmed = line.trim().substring(0, W - 4);
+            var prefix = i < lines.length - 1 ? '  \u2502  ' : '  \u2514  ';
+            console.log(rb('  \u2502') + '  ' + g(prefix + trimmed.padEnd(W - 4)) + rb('\u2502'));
+        });
+        if (opts.err.stack.split('\n').length > 5) {
+            console.log(rb('  \u2502') + '  ' + g('     ... more stack lines ...'.padEnd(W - 4)) + rb('\u2502'));
+        }
+        console.log(rb('  \u2502') + g(' '.repeat(W)) + rb('\u2502'));
+    }
+    console.log(r('  \u2514' + '\u2500'.repeat(W) + '\u2518'));
     console.log('');
 }
 
 // ═══════════════════════════════════════════════════════════════
-// v3.0 — WARN CALLOUT — clean indent format, no box borders
-// Untuk warning yang gampang kelewat di antara ratusan baris log.
+// WARN CALLOUT (legacy compat)
 // ═══════════════════════════════════════════════════════════════
 
-/**
- * WARNING CALLOUT — clearly separated from normal log lines.
- * Use for non-fatal issues that need attention during reverse engineering.
- *
- * @param {string} message  - What the warning is about
- * @param {object} opts
- * @param {string} [opts.source]  - Code source reference (e.g. 'main.min.js L121387')
- * @param {string} [opts.action]  - What the server did to handle it
- * @param {string} [opts.reason]  - Why this happened (root cause explanation)
- * @param {string} [opts.module]  - Module name for context
- */
 function warnCallout(message, opts) {
     opts = opts || {};
-    const y = chalk.yellow;
-    const yb = chalk.yellow.bold;
-    const w = chalk.white;
-    const g = chalk.gray;
-    const m = chalk.magenta;
-
+    var y = chalk.yellow, yb = chalk.yellow.bold, w = chalk.white, g = chalk.gray, m = chalk.magenta;
     console.log('');
-    console.log(yb('  ⚠️  ') + w.bold(message));
-    if (opts.source) console.log('       ' + m('SOURCE: ') + m(opts.source));
-    if (opts.action) console.log('       ' + g('ACTION: ') + g(opts.action));
-    if (opts.reason) console.log('       ' + w('REASON: ') + w(opts.reason));
-    if (opts.module) console.log('       ' + g('MODULE: ') + g(opts.module));
+    console.log(yb('  \u26A0\uFE0F  ') + w.bold(message));
+    if (opts.source) console.log('       ' + m('\u{1F4CE} SOURCE: ') + m(opts.source));
+    if (opts.action) console.log('       ' + g('\u{1F527} ACTION: ') + g(opts.action));
+    if (opts.reason) console.log('       ' + w('\u{1F4CE} REASON: ') + w(opts.reason));
+    if (opts.module) console.log('       ' + g('\u{1F4CB} MODULE: ') + g(opts.module));
     console.log('');
 }
 
 // ═══════════════════════════════════════════════════════════════
-// v3.0 — STATUS BADGE — Per-field trace status
-// Menunjukkan apakah value sudah di-trace ke main.min.js atau default.
+// v4.0 — WARN COLLAPSE — kumpulkan warning sama jadi 1 baris
 // ═══════════════════════════════════════════════════════════════
 
-const STATUS = {
-    traced:  { emoji: '✅', label: 'TRACED',  color: chalk.green },
-    fix:     { emoji: '✅', label: 'FIX',     color: chalk.cyan },
-    config:  { emoji: '⚙️',  label: 'CONFIG',  color: chalk.yellow },
-    default: { emoji: '🔸', label: 'DEFAULT', color: chalk.gray },
-    dead:    { emoji: '🚫', label: 'DEAD',    color: chalk.red },
-    missing: { emoji: '❌', label: 'MISSING', color: chalk.red.bold },
-    warn:    { emoji: '⚠️',  label: 'WARN',    color: chalk.yellow.bold },
-    ok:      { emoji: '✅', label: 'OK',      color: chalk.green },
-    fail:    { emoji: '❌', label: 'FAIL',    color: chalk.red },
+/**
+ * Collapse similar warnings into one summary line.
+ * Instead of printing 7 identical warnings, prints 1 line with count.
+ *
+ * @param {string} category   - Warning category e.g. "mutationLog string values"
+ * @param {number} count      - How many occurrences
+ * @param {string[]} [fields] - Affected field names
+ * @param {string} [hint]     - Fix hint
+ */
+function warnCollapse(category, count, fields, hint) {
+    if (count <= 1) return; // Don't collapse single warnings
+
+    var fieldStr = '';
+    if (fields && fields.length > 0) {
+        if (fields.length <= 4) {
+            fieldStr = '\n       \u{1F4CE} fields : ' + chalk.white(fields.join(', '));
+        } else {
+            fieldStr = '\n       \u{1F4CE} fields : ' + chalk.white(fields.slice(0, 4).join(', ')) + chalk.gray(' +' + (fields.length - 4) + ' more');
+        }
+    }
+
+    console.log('   \u26A0\uFE0F  ' + chalk.yellow(count + 'x ' + category) +
+                (hint ? ' \u2014 auto-coerced' : '') + fieldStr);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// STATUS / CRITICAL FIELDS / SUMMARY CARD / FIELD STATUS
+// ═══════════════════════════════════════════════════════════════
+
+var STATUS = {
+    traced:  { emoji: '\u2705', label: 'TRACED',  color: chalk.green },
+    fix:     { emoji: '\u2705', label: 'FIX',     color: chalk.cyan },
+    config:  { emoji: '\u2699\uFE0F',  label: 'CONFIG',  color: chalk.yellow },
+    default: { emoji: '\u{1F538}', label: 'DEFAULT', color: chalk.gray },
+    dead:    { emoji: '\u{1F6AB}', label: 'DEAD',    color: chalk.red },
+    missing: { emoji: '\u274C', label: 'MISSING', color: chalk.red.bold },
+    warn:    { emoji: '\u26A0\uFE0F', label: 'WARN',    color: chalk.yellow.bold },
+    ok:      { emoji: '\u2705', label: 'OK',      color: chalk.green },
+    fail:    { emoji: '\u274C', label: 'FAIL',    color: chalk.red },
 };
 
-/**
- * Single line with status badge — ideal for per-field logging inside boxes.
- * @param {string} key     - Field name
- * @param {string} value   - Value display
- * @param {string} status  - 'traced'|'fix'|'config'|'default'|'dead'|'missing'|'warn'|'ok'|'fail'
- * @param {string} detail  - Extra info (e.g. 'FIX-006', 'L134098')
- * @param {boolean} isLast - Last item in group
- */
 function fieldStatus(key, value, status, detail, isLast) {
-    const s = STATUS[status] || STATUS.default;
-    const connector = isLast ? '└' : '│';
-    const badge = s.color(s.emoji + ' ' + s.label);
-    const detailStr = detail ? chalk.dim('  ' + detail) : '';
-    const keyStr = chalk.white(String(key).padEnd(32));
-    const valStr = chalk.white(String(value).padEnd(20));
-    console.log(`  ${connector}   ${keyStr} ${valStr} ${badge}${detailStr}`);
+    var s = STATUS[status] || STATUS.default;
+    var connector = isLast ? '\u2514' : '\u2502';
+    var badge = s.color(s.emoji + ' ' + s.label);
+    var detailStr = detail ? chalk.dim('  ' + detail) : '';
+    console.log('  ' + connector + '   ' + chalk.white(String(key).padEnd(32)) + ' ' + chalk.white(String(value).padEnd(20)) + ' ' + badge + detailStr);
 }
 
-// ═══════════════════════════════════════════════════════════════
-// v3.0 — CRITICAL FIELDS AUDIT
-// Cek field yang bisa bikin game crash/stuck jika salah.
-// Log selalu tampil (tidak dipengaruhi LOG_LEVEL) karena KRITIS.
-// ═══════════════════════════════════════════════════════════════
-
-/**
- * Audit critical fields — fields that can crash/stuck the game if wrong.
- * ALWAYS logs regardless of LOG_LEVEL because these are life-or-death for the game.
- *
- * @param {Array} fields - Array of { name, value, status, detail }
- *   status: 'ok' | 'fail' | 'warn'
- *   detail: explanation (e.g. 'EMPTY — tutorial safe' or 'HERO PRE-PLACED!')
- * @returns {{ passed: number, failed: number, warned: number }}
- */
 function criticalFields(fields) {
     if (!fields || fields.length === 0) return { passed: 0, failed: 0, warned: 0 };
-
-    const stats = { passed: 0, failed: 0, warned: 0 };
-
+    var stats = { passed: 0, failed: 0, warned: 0 };
     console.log('');
-    console.log(chalk.red.bold('  🔒 CRITICAL FIELDS AUDIT — game will crash/stuck if wrong'));
-    console.log(chalk.gray('  ' + '─'.repeat(46)));
-
-    fields.forEach((f, i) => {
-        const isLast = (i === fields.length - 1);
-        const connector = isLast ? '└' : '├';
-
-        let icon;
-        if (f.status === 'ok') { icon = '✅'; stats.passed++; }
-        else if (f.status === 'fail') { icon = '🚫'; stats.failed++; }
-        else { icon = '⚠️'; stats.warned++; }
-
-        const name = chalk.white(f.name.padEnd(24));
-        const val = f.status === 'ok'
-            ? chalk.green(String(f.value))
-            : f.status === 'fail'
-                ? chalk.red(String(f.value))
+    console.log(chalk.red.bold('  \u{1F512} CRITICAL FIELDS AUDIT \u2014 game will crash/stuck if wrong'));
+    fields.forEach(function(f, i) {
+        var isLast = (i === fields.length - 1);
+        var connector = isLast ? '\u2514' : '\u251C';
+        var icon;
+        if (f.status === 'ok') { icon = '\u2705'; stats.passed++; }
+        else if (f.status === 'fail') { icon = '\u{1F6AB}'; stats.failed++; }
+        else { icon = '\u26A0\uFE0F'; stats.warned++; }
+        var name = chalk.white(f.name.padEnd(24));
+        var val = f.status === 'ok' ? chalk.green(String(f.value))
+                : f.status === 'fail' ? chalk.red(String(f.value))
                 : chalk.yellow(String(f.value));
-        const detail = f.detail ? chalk.dim('  ' + f.detail) : '';
-
-        console.log(`  ${connector} 🔒 ${name} = ${val}${detail}`);
+        var detail = f.detail ? chalk.dim('  ' + f.detail) : '';
+        console.log('  ' + connector + ' \u{1F512} ' + name + ' = ' + val + detail);
     });
-
-    // Summary line
-    const allOk = stats.failed === 0;
-    const verdict = allOk
-        ? chalk.green.bold(`  ✅ CRITICAL AUDIT: ${stats.passed}/${fields.length} PASSED${stats.warned > 0 ? `, ${stats.warned} warning(s)` : ''}`)
-        : chalk.red.bold(`  ⚠️ CRITICAL AUDIT: ${stats.passed}/${fields.length} PASSED — ${stats.failed} ISSUES`);
+    var allOk = stats.failed === 0;
+    var verdict = allOk
+        ? chalk.green.bold('  \u2705 CRITICAL AUDIT: ' + stats.passed + '/' + fields.length + ' PASSED' + (stats.warned > 0 ? ', ' + stats.warned + ' warning(s)' : ''))
+        : chalk.red.bold('  \u26A0\uFE0F CRITICAL AUDIT: ' + stats.passed + '/' + fields.length + ' PASSED \u2014 ' + stats.failed + ' ISSUES');
     console.log(verdict);
-    console.log('');
-
     return stats;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// v3.0 — SUMMARY CARD — No box borders, just ═══ separators
-// Penutup yang informatif setelah ratusan baris log.
-// ═══════════════════════════════════════════════════════════════
-
-/**
- * Full summary card — informative closing after hundreds of log lines.
- * Shows all key metrics. No side box borders, just ═══ top/bottom.
- *
- * @param {object} data
- * @param {string} data.title      - e.g. 'ENTER GAME COMPLETE'
- * @param {string} data.userId     - User identifier
- * @param {string} data.userType   - e.g. 'New User' or 'Returning User'
- * @param {number} data.fields     - Total response fields
- * @param {number} data.heroes     - Hero count
- * @param {number} data.diamond    - Diamond amount
- * @param {number} data.level      - Player level
- * @param {number} data.jsonSize   - JSON string size
- * @param {number} data.respSize   - Response payload size
- * @param {boolean}data.compressed - Whether response is LZ-string compressed
- * @param {number} data.duration   - Total processing time in ms
- * @param {object} data.critical   - { passed, failed, warned } from criticalFields()
- * @param {number} data.warnings   - Total warnings during processing
- * @param {number} data.errors     - Total errors during processing
- */
 function summaryCard(data) {
-    const g = chalk.green.bold;
-    const r = chalk.red.bold;
-    const w = chalk.white;
-    const gr = chalk.gray;
-    const y = chalk.yellow;
-
-    const isOk = (data.errors || 0) === 0;
-    const titleEmoji = isOk ? '✅' : '❌';
-    const hasWarnings = (data.warnings || 0) > 0;
-    const titleSuffix = hasWarnings ? ' — WITH WARNINGS' : '';
-
-    // Timing bar
-    const dur = data.duration || 0;
-    const barCount = Math.min(Math.floor(dur / 7), 16);
-    const barColor = dur > 2000 ? chalk.red : dur > 1000 ? chalk.yellow : chalk.green;
-    const bar = barCount > 0 ? barColor('█'.repeat(barCount)) + gr('░'.repeat(16 - barCount)) : gr('░'.repeat(16));
-
-    // ═══ Top separator ═══
-    console.log('');
-    console.log(chalk.gray('  ═══════════════════════════════════════════'));
-    console.log('');
-
-    // Title
-    const titleColor = isOk && !hasWarnings ? g : hasWarnings ? chalk.yellow.bold : r;
-    console.log(titleColor(`  ${titleEmoji} ${data.title || 'COMPLETE'}${titleSuffix}`));
-    console.log('');
-
-    // User info
-    if (data.userId)   console.log(w('  👤 USER:       ') + w(data.userId + (data.userType ? ` (${data.userType})` : '')));
-    if (data.fields !== undefined) console.log(w('  📦 FIELDS:     ') + y(String(data.fields)));
-    if (data.heroes !== undefined) console.log(w('  🦸 HEROES:     ') + w(String(data.heroes) + ' hero(es)'));
-    if (data.diamond !== undefined) console.log(w('  💎 DIAMOND:    ') + w(String(data.diamond)));
-    if (data.level !== undefined) console.log(w('  🏆 LEVEL:      ') + w(String(data.level)));
-
-    console.log('');
-
-    // Technical metrics
-    if (data.jsonSize !== undefined) console.log(w('  📏 JSON SIZE:  ') + w(data.jsonSize.toLocaleString() + ' chars'));
-    if (data.respSize !== undefined) console.log(w('  📦 RESP SIZE:  ') + w(data.respSize.toLocaleString() + ' chars'));
-    if (data.compressed !== undefined) console.log(w('  🔐 PROTOCOL:   ') + (data.compressed ? g('LZ-STRING') : gr('RAW')));
-    if (data.duration !== undefined) console.log(w('  ⏱️ TOTAL TIME: ') + w(dur + 'ms  ') + bar);
-
-    console.log('');
-
-    // Critical + Warnings + Errors
-    if (data.critical) {
-        const totalCrit = data.critical.passed + data.critical.failed + data.critical.warned;
-        const critOk = data.critical.failed === 0;
-        const critStr = critOk && data.critical.warned === 0
-            ? g(`${data.critical.passed}/${totalCrit} PASSED`)
-            : critOk
-                ? y(`${data.critical.passed}/${totalCrit} PASSED — ${data.critical.warned} ISSUES`)
-                : r(`${data.critical.passed}/${totalCrit} PASSED — ${data.critical.failed} ISSUES`);
-        console.log(w('  🔒 CRITICAL:   ') + critStr);
-    }
-    if (data.warnings !== undefined) {
-        const wColor = data.warnings > 0 ? y : g;
-        console.log(w('  ⚠️ WARNINGS:   ') + wColor(String(data.warnings)));
-    }
-    if (data.errors !== undefined) {
-        const eColor = data.errors > 0 ? r : g;
-        console.log(w('  ❌ ERRORS:     ') + eColor(String(data.errors)));
-    }
-
-    // ═══ Bottom separator ═══
-    console.log('');
-    console.log(chalk.gray('  ═══════════════════════════════════════════'));
-    console.log('');
+    // Delegate to handlerClose for consistency — but keep backward compat
+    handlerClose(data.reqId || '----', data.action || 'UNKNOWN', {
+        ret: data.errors > 0 ? 1 : 0,
+        duration: data.duration,
+        protocol: data.compressed ? 'LZ-STRING' : 'RAW',
+        respSize: data.respSize,
+        jsonSize: data.jsonSize,
+        userId: data.userId,
+        userType: data.userType,
+        heroes: data.heroes,
+        level: data.level,
+        diamond: data.diamond,
+        fields: data.fields,
+        critical: data.critical,
+        warnings: data.warnings,
+        errors: data.errors,
+        typePass: data.typePass,
+        typeFail: data.typeFail,
+    });
 }
 
-// ═══════════════════════════════════════════════════════════════
-// v3.0 — WARNING SECTION — Structured multi-warning display
-// Shows collected warnings with IDs, Expected/Got/Impact/Fix detail.
-// ═══════════════════════════════════════════════════════════════
-
-/**
- * Structured warning section — displays multiple warnings with details.
- * Use after pipeline steps to show all collected warnings in one place.
- *
- * @param {Array} warnings - Array of warning objects:
- *   { id: 'W001', message: '...', expected: '...', got: '...', impact: '...', fix: '...' }
- */
 function warningSection(warnings) {
     if (!warnings || warnings.length === 0) return;
-
-    const yb = chalk.yellow.bold;
-    const y = chalk.yellow;
-    const w = chalk.white;
-    const g = chalk.gray;
-    const m = chalk.magenta;
-
     console.log('');
-    console.log(yb('  ⚠️ WARNINGS DETECTED'));
-    console.log(g('  ' + '─'.repeat(46)));
-
-    warnings.forEach((warn, i) => {
-        const isLast = (i === warnings.length - 1);
-        console.log(yb(`  ⚠️  [${warn.id || 'W' + String(i + 1).padStart(3, '0')}] `) + w(warn.message));
-        if (warn.expected) console.log(g('       Expected: ') + w(warn.expected));
-        if (warn.got)      console.log(g('       Got:      ') + m(warn.got));
-        if (warn.impact)   console.log(g('       Impact:   ') + y(warn.impact));
-        if (warn.fix)      console.log(g('       Fix:      ') + g(warn.fix));
+    console.log(chalk.yellow.bold('  \u26A0\uFE0F WARNINGS DETECTED'));
+    warnings.forEach(function(warn, i) {
+        var isLast = (i === warnings.length - 1);
+        console.log(chalk.yellow.bold('  \u26A0\uFE0F  [' + (warn.id || 'W' + String(i + 1).padStart(3, '0')) + '] ') + chalk.white(warn.message));
+        if (warn.expected) console.log(chalk.gray('       Expected: ') + chalk.white(warn.expected));
+        if (warn.got)      console.log(chalk.gray('       Got:      ') + chalk.magenta(warn.got));
+        if (warn.impact)   console.log(chalk.gray('       Impact:   ') + chalk.yellow(warn.impact));
+        if (warn.fix)      console.log(chalk.gray('       Fix:      ') + chalk.gray(warn.fix));
         if (!isLast) console.log('');
     });
-
-    console.log(yb(`  ⚠️ TOTAL WARNINGS: ${warnings.length}`));
+    console.log(chalk.yellow.bold('  \u26A0\uFE0F TOTAL WARNINGS: ' + warnings.length));
     console.log('');
 }
 
 // ═══════════════════════════════════════════════════════════════
-// v3.1 — TYPE ASSERT — Validate value types at runtime
+// TYPE ASSERT / INVARIANT CHECK / MUTATION LOG / DEEP TYPE SCAN
 // ═══════════════════════════════════════════════════════════════
 
-/**
- * Assert TYPE of a value at a given field path.
- * PASS → single DEBUG line with ✅; FAIL → errorBanner + details with full context.
- *
- * @param {string} fieldPath    - Dot-separated field path (e.g. 'heros._heros')
- * @param {*}      actualValue  - The value to check
- * @param {string} expectedType - 'number'|'string'|'object'|'array'|'boolean'
- * @param {object} [opts]
- * @param {string} [opts.context]  - Context description
- * @param {string} [opts.trace]    - main.min.js line reference
- * @param {string} [opts.consumer] - Client function that consumes this data
- * @param {string} [opts.impact]   - What will happen if this fails
- * @returns {boolean} true = pass, false = fail
- */
 function typeAssert(fieldPath, actualValue, expectedType, opts) {
     opts = opts || {};
     var passed = false;
     var actualType = typeof actualValue;
-
     switch (expectedType) {
-        case 'number':
-            passed = (actualType === 'number' && !isNaN(actualValue));
-            break;
-        case 'string':
-            passed = (actualType === 'string');
-            break;
-        case 'object':
-            passed = (actualType === 'object' && actualValue !== null && !Array.isArray(actualValue));
-            break;
-        case 'array':
-            passed = Array.isArray(actualValue);
-            break;
-        case 'boolean':
-            passed = (actualType === 'boolean');
-            break;
-        default:
-            passed = false;
+        case 'number': passed = (actualType === 'number' && !isNaN(actualValue)); break;
+        case 'string': passed = (actualType === 'string'); break;
+        case 'object': passed = (actualType === 'object' && actualValue !== null && !Array.isArray(actualValue)); break;
+        case 'array': passed = Array.isArray(actualValue); break;
+        case 'boolean': passed = (actualType === 'boolean'); break;
+        default: passed = false;
     }
-
     if (passed) {
-        // PASS: single DEBUG line — only visible at DEBUG log level
         log('DEBUG', 'VALIDATE', '\u2705 typeAssert PASS: ' + fieldPath + ' is ' + expectedType);
     } else {
-        // FAIL: always visible — use errorBanner (ERROR level) + details
         errorBanner({
             module: opts.context || 'VALIDATE',
             step: opts.trace || '',
@@ -1157,186 +1139,52 @@ function typeAssert(fieldPath, actualValue, expectedType, opts) {
             consumer: opts.consumer || '',
             impact: opts.impact || 'Unexpected type may crash client or corrupt data',
         });
-        details('error',
-            ['field', fieldPath],
-            ['expected', expectedType],
-            ['actual', actualType],
-            ['value', String(actualValue)]
-        );
+        details('error', ['field', fieldPath], ['expected', expectedType], ['actual', actualType], ['value', String(actualValue)]);
     }
-
     return passed;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// v3.1 — RESPONSE SNAPSHOT — Green box with anomaly flags
-// Audit view of response data with type info and anomaly detection.
-// ═══════════════════════════════════════════════════════════════
-
-/**
- * Response snapshot — green-bordered box showing each key with type info and anomaly flags.
- * Always visible regardless of LOG_LEVEL (important audit data).
- *
- * @param {string} label - Snapshot label
- * @param {object} data  - Data object to snapshot
- */
-function responseSnapshot(label, data) {
-    if (!data || typeof data !== 'object') return;
-
-    var keys = Object.keys(data);
-    var total = keys.length;
-
-    colorBox(label, '\u{1F4F8}', 'success');
-
-    keys.forEach(function (key, i) {
-        var isLast = (i === total - 1);
-        var connector = isLast ? '\u2514' : '\u251C';
-        var val = data[key];
-        var keyStr = chalk.white(key.padEnd(28));
-
-        // Type display (same style as objectTree)
-        var typeStr;
-        var anomalyFlag = '';
-
-        if (val === null) {
-            typeStr = chalk.gray('null');
-            anomalyFlag = chalk.yellow(' \u26A0\uFE0F NULL');
-        } else if (val === undefined) {
-            typeStr = chalk.gray('undefined');
-            anomalyFlag = chalk.red(' \u26A0\uFE0F UNDEFINED');
-        } else if (Array.isArray(val)) {
-            typeStr = chalk.cyan('Array[' + val.length + ']');
-            if (val.length === 0) anomalyFlag = chalk.yellow(' \u26A0\uFE0F EMPTY');
-        } else if (typeof val === 'object') {
-            var subKeys = Object.keys(val).length;
-            typeStr = chalk.cyan('Object{' + subKeys + '}');
-        } else if (typeof val === 'boolean') {
-            typeStr = chalk.yellow(String(val));
-        } else if (typeof val === 'number') {
-            typeStr = chalk.yellow(String(val));
-            if (isNaN(val)) anomalyFlag = chalk.red(' \u26A0\uFE0F NaN!');
-            else if (val < 0) anomalyFlag = chalk.yellow(' \u26A0\uFE0F NEGATIVE');
-        } else if (typeof val === 'string') {
-            var preview = val.length > 28 ? val.substring(0, 28) + '...' : val;
-            typeStr = chalk.green('"' + preview + '"');
-        } else {
-            typeStr = chalk.gray(typeof val);
-        }
-
-        console.log('  ' + connector + '   ' + keyStr + ' ' + typeStr + anomalyFlag);
-    });
-
-    boxClose();
-}
-
-// ═══════════════════════════════════════════════════════════════
-// v3.1 — INVARIANT CHECK — Assert boolean conditions by rule name
-// ═══════════════════════════════════════════════════════════════
-
-/**
- * Invariant check — asserts a boolean condition by rule name.
- * PASS → single DEBUG line; FAIL → warnCallout with full context.
- *
- * @param {string}  ruleName  - Name of the invariant rule
- * @param {*}       condition - Truthy = pass, falsy = fail
- * @param {object}  [opts]
- * @param {string}  [opts.context]  - Context description
- * @param {string}  [opts.expect]   - What was expected
- * @param {string}  [opts.actual]   - What was actually found
- * @param {string}  [opts.trace]    - main.min.js line reference
- * @param {string}  [opts.impact]   - Impact if violated
- * @param {string}  [opts.fix]      - Suggested fix
- * @returns {boolean} true = pass, false = fail
- */
 function invariantCheck(ruleName, condition, opts) {
     if (condition) {
         log('DEBUG', 'VALIDATE', '\u2705 invariant PASS: ' + ruleName);
         return true;
     }
-
-    // FAIL: warnCallout (WARN level) — always visible at WARN and above
     var failOpts = {};
     if (opts) {
         if (opts.context) failOpts.source = opts.context + (opts.trace ? ' ' + opts.trace : '');
         if (opts.fix)     failOpts.action = opts.fix;
         if (opts.actual)  failOpts.reason = 'Expected: ' + (opts.expect || 'truthy') + ', Got: ' + opts.actual;
-        if (opts.impact && opts.actual) {
-            failOpts.reason = failOpts.reason + ' \u2014 ' + opts.impact;
-        } else if (opts.impact) {
-            failOpts.reason = opts.impact;
-        }
+        if (opts.impact && opts.actual) failOpts.reason = failOpts.reason + ' \u2014 ' + opts.impact;
+        else if (opts.impact) failOpts.reason = opts.impact;
     }
     warnCallout('INVARIANT VIOLATION: ' + ruleName, failOpts);
     return false;
 }
 
-// ═══════════════════════════════════════════════════════════════
-// v3.1 — MUTATION LOG — Log value changes with delta + anomalies
-// ═══════════════════════════════════════════════════════════════
-
-/**
- * Log a value mutation with delta calculation and anomaly detection.
- * Always visible regardless of LOG_LEVEL (important data change).
- *
- * @param {object} opts
- * @param {string} opts.field       - Field name
- * @param {number} opts.before      - Value before mutation
- * @param {number} opts.after       - Value after mutation
- * @param {string} [opts.unit]      - Unit label (e.g. 'gold', 'HP')
- * @param {number} [opts.maxDelta]  - Maximum allowed delta
- * @param {boolean}[opts.nonNegative]- If true, after < 0 triggers warning
- * @param {boolean}[opts.noChange]  - If true, delta === 0 triggers warning
- * @param {string} [opts.context]   - Context description
- */
 function mutationLog(opts) {
     if (!opts) return;
-
     var delta = (opts.after || 0) - (opts.before || 0);
     var sign = delta >= 0 ? '+' : '';
     var unit = opts.unit ? ' ' + opts.unit : '';
     var deltaStr = sign + delta + unit;
-
     var anomalyFlag = '';
-
-    if (opts.maxDelta !== undefined && opts.maxDelta !== null && Math.abs(delta) > opts.maxDelta) {
+    if (opts.maxDelta !== undefined && opts.maxDelta !== null && Math.abs(delta) > opts.maxDelta)
         anomalyFlag = chalk.red(' \u26A0\uFE0F DELTA TOO LARGE (max=' + opts.maxDelta + ')');
-    }
-    if (opts.nonNegative && opts.after < 0) {
+    if (opts.nonNegative && opts.after < 0)
         anomalyFlag = chalk.red(' \u26A0\uFE0F NEGATIVE RESULT!');
-    }
-    if (opts.noChange && delta === 0) {
-        anomalyFlag = chalk.yellow(' \u26A0\uFE0F NO CHANGE \u2014 mutation had no effect');
-    }
-
+    if (opts.noChange && delta === 0)
+        anomalyFlag = chalk.yellow(' \u26A0\uFE0F NO CHANGE');
     var beforeStr = String(opts.before) + unit;
     var afterStr = String(opts.after) + unit;
     var summary = chalk.cyan(beforeStr) + ' \u2192 ' + chalk.cyan(afterStr) + ' (' + chalk.green(deltaStr) + ')' + anomalyFlag;
     var context = opts.context ? ' [' + opts.context + ']' : '';
-
     details('mutation', [opts.field || '?', summary + context]);
 }
 
-// ═══════════════════════════════════════════════════════════════
-// v3.1 — DEEP TYPE SCAN — Batch type validation (no logging)
-// Returns results for caller to handle logging.
-// ═══════════════════════════════════════════════════════════════
-
-/**
- * Deep type scan — compare object field types against expected type specs.
- * Does NOT log anything; returns results for the caller to handle.
- *
- * @param {object} obj    - Object to scan
- * @param {object} specs  - { fieldName: 'expectedType', ... }
- * @param {string} prefix - Path prefix for nested fields (e.g. 'responseData')
- * @returns {{ passed: number, failed: number, errors: Array<{ path, expected, actual, value }> }}
- */
 function deepTypeScan(obj, specs, prefix) {
     var result = { passed: 0, failed: 0, errors: [] };
-
     if (!obj || typeof obj !== 'object' || !specs) return result;
-
     var specKeys = Object.keys(specs);
-
     for (var i = 0; i < specKeys.length; i++) {
         var fieldName = specKeys[i];
         var expectedType = specs[fieldName];
@@ -1344,30 +1192,16 @@ function deepTypeScan(obj, specs, prefix) {
         var path = prefix ? prefix + '.' + fieldName : fieldName;
         var match = false;
         var actualType = typeof val;
-
         switch (expectedType) {
-            case 'array':
-                match = Array.isArray(val);
-                break;
-            case 'object':
-                match = (actualType === 'object' && val !== null && !Array.isArray(val));
-                break;
-            case 'number':
-                match = (actualType === 'number');
-                break;
-            case 'string':
-                match = (actualType === 'string');
-                break;
-            case 'boolean':
-                match = (actualType === 'boolean');
-                break;
-            default:
-                match = (actualType === expectedType);
+            case 'array': match = Array.isArray(val); break;
+            case 'object': match = (actualType === 'object' && val !== null && !Array.isArray(val)); break;
+            case 'number': match = (actualType === 'number'); break;
+            case 'string': match = (actualType === 'string'); break;
+            case 'boolean': match = (actualType === 'boolean'); break;
+            default: match = (actualType === expectedType);
         }
-
-        if (match) {
-            result.passed++;
-        } else {
+        if (match) result.passed++;
+        else {
             result.failed++;
             result.errors.push({
                 path: path,
@@ -1377,21 +1211,13 @@ function deepTypeScan(obj, specs, prefix) {
             });
         }
     }
-
     return result;
 }
 
 // ═══════════════════════════════════════════════════════════════
-// v3.1 — SAVE VERIFY — Post-save integrity check
-// Reads back saved data from DB and compares critical paths.
+// SAVE VERIFY / RESPONSE SNAPSHOT
 // ═══════════════════════════════════════════════════════════════
 
-/**
- * Walk a dot-separated path on an object to get the leaf value.
- * @param {object} obj  - Object to walk
- * @param {string} path - Dot-separated path (e.g. 'heros._heros')
- * @returns {*} Leaf value, or undefined if path cannot be walked
- */
 function walkPath(obj, path) {
     if (!obj || !path) return undefined;
     var parts = path.split('.');
@@ -1403,119 +1229,432 @@ function walkPath(obj, path) {
     return current;
 }
 
-/**
- * Save verification — read back saved data and compare critical paths.
- * Verifies data integrity after a database save operation.
- *
- * @param {string}   userId        - User ID to verify
- * @param {object}   db            - Database object with getUser() method
- * @param {object}   expectedData  - Expected data to compare against
- * @param {string[]} criticalPaths - Dot-separated paths to compare
- * @returns {boolean} true = all OK, false = mismatch or error
- */
 function saveVerify(userId, db, expectedData, criticalPaths) {
     if (!db || !db.getUser) return false;
-
     var savedData = db.getUser(userId);
     if (!savedData) {
-        errorBanner({
-            module: 'SAVE',
-            message: 'User data NOT FOUND after save!',
-            trace: 'userId=' + userId,
-            impact: 'Save operation may have failed silently',
-        });
+        errorBanner({ module: 'SAVE', message: 'User data NOT FOUND after save!', trace: 'userId=' + userId, impact: 'Save operation may have failed silently' });
         return false;
     }
-
     var allOk = true;
-
     for (var i = 0; i < criticalPaths.length; i++) {
         var path = criticalPaths[i];
         var expected = walkPath(expectedData, path);
         var actual = walkPath(savedData, path);
-
         if (JSON.stringify(expected) !== JSON.stringify(actual)) {
-            warnCallout('SAVE INTEGRITY: ' + path + ' MISMATCH', {
-                reason: 'Expected: ' + JSON.stringify(expected) + ', Got: ' + JSON.stringify(actual),
-                module: 'SAVE',
-            });
+            warnCallout('SAVE INTEGRITY: ' + path + ' MISMATCH', { reason: 'Expected: ' + JSON.stringify(expected) + ', Got: ' + JSON.stringify(actual), module: 'SAVE' });
             allOk = false;
         }
     }
-
-    if (allOk) {
-        log('DEBUG', 'SAVE', '\u2705 saveVerify: ' + criticalPaths.length + '/' + criticalPaths.length + ' paths OK');
-    }
-
+    if (allOk) log('DEBUG', 'SAVE', '\u2705 saveVerify: ' + criticalPaths.length + '/' + criticalPaths.length + ' paths OK');
     return allOk;
 }
 
+function responseSnapshot(label, data) {
+    if (!data || typeof data !== 'object') return;
+    var keys = Object.keys(data);
+    var total = keys.length;
+    colorBox(label, '\u{1F4F8}', 'success');
+    keys.forEach(function(key, i) {
+        var isLast = (i === total - 1);
+        var connector = isLast ? '\u2514' : '\u251C';
+        var val = data[key];
+        var keyStr = chalk.white(key.padEnd(28));
+        var typeStr;
+        var anomalyFlag = '';
+        if (val === null) { typeStr = chalk.gray('null'); anomalyFlag = chalk.yellow(' \u26A0\uFE0F NULL'); }
+        else if (val === undefined) { typeStr = chalk.gray('undefined'); anomalyFlag = chalk.red(' \u26A0\uFE0F UNDEFINED'); }
+        else if (Array.isArray(val)) { typeStr = chalk.cyan('Array[' + val.length + ']'); if (val.length === 0) anomalyFlag = chalk.yellow(' \u26A0\uFE0F EMPTY'); }
+        else if (typeof val === 'object') { typeStr = chalk.cyan('Object{' + Object.keys(val).length + '}'); }
+        else if (typeof val === 'boolean') typeStr = chalk.yellow(String(val));
+        else if (typeof val === 'number') { typeStr = chalk.yellow(String(val)); if (isNaN(val)) anomalyFlag = chalk.red(' \u26A0\uFE0F NaN!'); else if (val < 0) anomalyFlag = chalk.yellow(' \u26A0\uFE0F NEGATIVE'); }
+        else if (typeof val === 'string') { var p = val.length > 28 ? val.substring(0, 28) + '...' : val; typeStr = chalk.green('"' + p + '"'); }
+        else typeStr = chalk.gray(typeof val);
+        console.log('  ' + connector + '   ' + keyStr + ' ' + typeStr + anomalyFlag);
+    });
+    boxClose();
+}
+
 // ═══════════════════════════════════════════════════════════════
-// v3.2 — HANDLER DIVIDER — ═══ pemisah antar handler
-// Double-line separator untuk memisahkan log antar handler.
+// HANDLER DIVIDER / PHASE HEADER / PHASE DIVIDER (legacy compat)
 // ═══════════════════════════════════════════════════════════════
 
-/**
- * Handler divider — thick ═══ line between different handler logs.
- * Makes it easy to find where one handler's log ends and another begins.
- *
- * @param {string} handlerName - Name of the handler (e.g. 'summonOneFree')
- * @param {string} action      - Full action path (e.g. 'summon/summonOneFree')
- * @param {string} [userId]    - Optional userId for context
- */
 function handlerDivider(handlerName, action, userId) {
-    var W = BOX_WIDTH;
-    console.log('');
-    console.log(chalk.cyan.bold('  ══' + '═'.repeat(W - 4) + '══'));
-    var label = '  🎮 HANDLER: ' + chalk.white.bold(handlerName);
-    if (action) label += chalk.gray('  (' + action + ')');
-    if (userId) label += chalk.gray('  userId=' + chalk.white(userId.substring(0, 16)));
-    console.log(label);
-    console.log(chalk.cyan.bold('  ══' + '═'.repeat(W - 4) + '══'));
-    console.log('');
+    // Now just calls handlerOpen without reqId
+    handlerOpen('----', action || handlerName, userId);
 }
 
-// ═══════════════════════════════════════════════════════════════
-// v3.2 — PHASE HEADER — Emoji header per phase
-// Judul phase dengan emoji dan nomor, memudahkan pencarian.
-// ═══════════════════════════════════════════════════════════════
-
-/**
- * Phase header — prints a numbered phase title with emoji.
- * Used at the start of each of the 10 phases.
- *
- * @param {number} phaseNum  - Phase number (1-10)
- * @param {number} total     - Total phases (usually 10)
- * @param {string} emoji     - Emoji for this phase
- * @param {string} title     - Phase title (e.g. 'ENTRY CHECK')
- */
 function phaseHeader(phaseNum, total, emoji, title) {
-    var num = chalk.gray('[' + String(phaseNum).padStart(2, '0') + '/' + String(total).padStart(2, '0') + ']');
-    console.log('');
-    console.log(chalk.cyan('  ──' + '─'.repeat(BOX_WIDTH - 6) + '──'));
-    console.log('  ' + num + ' ' + emoji + ' ' + chalk.white.bold(title));
-    console.log(chalk.cyan('  ──' + '─'.repeat(BOX_WIDTH - 6) + '──'));
-    console.log('');
+    phase(emoji, phaseNum, title);
 }
 
-// ═══════════════════════════════════════════════════════════════
-// v3.2 — PHASE DIVIDER — ─── pemisah antar phase
-// Thin separator between phases within the same handler.
-// ═══════════════════════════════════════════════════════════════
-
-/**
- * Phase divider — thin ─── line between phases within a handler.
- * Lighter than handlerDivider, just separates logical sections.
- *
- * @param {string} [label] - Optional label to show on the divider
- */
 function phaseDivider(label) {
     if (label) {
         var padded = '  ' + label + ' ';
         var sideLen = Math.max(1, Math.floor((BOX_WIDTH - padded.length) / 2));
-        console.log(chalk.gray('  ' + '─'.repeat(sideLen) + chalk.dim(padded) + '─'.repeat(sideLen)));
+        console.log(chalk.gray('  ' + '\u2500'.repeat(sideLen) + chalk.dim(padded) + '\u2500'.repeat(sideLen)));
     } else {
-        console.log(chalk.gray('  ──' + '─'.repeat(BOX_WIDTH - 6) + '──'));
+        console.log(chalk.gray('  \u2500\u2500' + '\u2500'.repeat(BOX_WIDTH - 6) + '\u2500\u2500'));
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// v4.0 — GLOBAL ERROR CAPTURE
+// Catches errors that happen OUTSIDE handler pipeline.
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Log an uncaught exception — the LAST line of defense.
+ * @param {Error}  err    - The error object
+ * @param {string} origin - 'uncaughtException' or similar
+ */
+function fatalCapture(err, origin) {
+    var W = 62;
+    var sep = chalk.red.bold('\u{1F4A5}\u2501'.repeat(Math.ceil(W / 2)).substring(0, W));
+
+    console.log('');
+    console.log(sep);
+    console.log(chalk.red.bold('  \u{1F4A5}  UNCAUGHT EXCEPTION  ' + chalk.white(origin || 'unknown')));
+    console.log(sep);
+
+    // ── Bulletproof guard: err can be undefined/null/non-Error ──
+    if (err === undefined || err === null) {
+        console.log('   \u{1F527} error   : ' + chalk.yellow('undefined/null — no error object received'));
+        console.log('   \u{1F4CE} hint    : ' + chalk.gray('Check process.on("uncaughtException") binding'));
+        console.log(sep);
+        return;
+    }
+    if (!(err instanceof Error)) {
+        console.log('   \u{1F527} error   : ' + chalk.white(String(err)));
+        console.log('   \u{1F4C4} type    : ' + chalk.yellow(typeof err + ' (not Error instance)'));
+        console.log(sep);
+        return;
+    }
+
+    console.log('   \u{1F527} error   : ' + chalk.white(err.message));
+    console.log('   \u{1F4C4} type    : ' + chalk.yellow(err.constructor.name));
+
+    if (err.stack) {
+        var lines = err.stack.split('\n').slice(1, 6);
+        console.log('   \u{1F4CD} stack   :');
+        lines.forEach(function(line) {
+            console.log('       ' + chalk.gray(line.trim()));
+        });
+        if (err.stack.split('\n').length > 6) {
+            console.log('       ' + chalk.gray('... more stack lines ...'));
+        }
+    }
+
+    console.log(sep);
+}
+
+/**
+ * Log an unhandled promise rejection.
+ * @param {*}      reason  - The rejection reason
+ * @param {Promise} promise - The rejected promise
+ */
+function rejectionCapture(reason, promise) {
+    var W = 62;
+    var sep = chalk.red.bold('\u{1F4A5}\u2501'.repeat(Math.ceil(W / 2)).substring(0, W));
+
+    // ── Bulletproof guard: reason can be anything ──
+    var reasonStr;
+    if (reason === undefined || reason === null) {
+        reasonStr = chalk.yellow('undefined/null — no rejection reason received');
+    } else if (reason instanceof Error) {
+        reasonStr = chalk.white(reason.message);
+    } else {
+        reasonStr = chalk.white(String(reason)) + chalk.gray(' (' + typeof reason + ')');
+    }
+
+    console.log('');
+    console.log(sep);
+    console.log(chalk.red.bold('  \u{1F4A5}  UNHANDLED REJECTION'));
+    console.log(sep);
+
+    console.log('   \u{1F527} reason  : ' + reasonStr);
+
+    if (_currentReqId) {
+        console.log('   \u{1F3CF}\u{FE0F} request : ' + chalk.cyan.bold(_currentReqId));
+    }
+
+    if (reason instanceof Error && reason.stack) {
+        var lines = reason.stack.split('\n').slice(1, 4);
+        console.log('   \u{1F4CD} stack   :');
+        lines.forEach(function(line) {
+            console.log('       ' + chalk.gray(line.trim()));
+        });
+    }
+
+    console.log(sep);
+}
+
+/**
+ * Log a handler crash — caught by the error boundary wrapper in index.js.
+ * @param {string} reqId   - Request ID
+ * @param {object} request - The original request object
+ * @param {Error}  err     - The error
+ */
+function handlerCrash(reqId, request, err) {
+    var W = 62;
+    var sep = chalk.red.bold('\u{1F4A5}\u2501'.repeat(Math.ceil(W / 2)).substring(0, W));
+
+    var actionStr = (request && request.type || '?') + '::' + (request && request.action || '?');
+
+    console.log('');
+    console.log(sep);
+    console.log(chalk.red.bold('  \u{1F4A5}  ' + (reqId || '????') + '  HANDLER CRASH  \u{1F4E8} ' + actionStr));
+    console.log(sep);
+
+    // ── Bulletproof guard: err can be anything ──
+    if (err === undefined || err === null) {
+        console.log('   \u{1F527} error   : ' + chalk.yellow('undefined/null — no error object received'));
+        console.log(sep);
+        return;
+    }
+    if (!(err instanceof Error)) {
+        console.log('   \u{1F527} error   : ' + chalk.white(String(err)));
+        console.log('   \u{1F4C4} type    : ' + chalk.yellow(typeof err + ' (not Error instance)'));
+        console.log(sep);
+        return;
+    }
+
+    console.log('   \u{1F527} error   : ' + chalk.white(err.message));
+    console.log('   \u{1F4C4} type    : ' + chalk.yellow(err.constructor.name));
+
+    if (err.stack) {
+        // Extract file:line from first stack frame
+        var firstFrame = err.stack.split('\n')[1];
+        if (firstFrame) {
+            var match = firstFrame.match(/\((.+):(\d+):(\d+)\)/);
+            if (match) {
+                console.log('   \u{1F4C1} file    : ' + chalk.white(match[1]));
+                console.log('   \u{1F4CF} line    : ' + chalk.yellow(match[2] + ':' + match[3]));
+            }
+        }
+        var lines = err.stack.split('\n').slice(1, 5);
+        console.log('   \u{1F4CD} stack   :');
+        lines.forEach(function(line) {
+            console.log('       ' + chalk.gray(line.trim()));
+        });
+    }
+
+    if (request.userId) {
+        console.log('   \u{1F464} userId  : ' + chalk.white(request.userId));
+    }
+    if (request.relayAction) {
+        console.log('   \u{1F4E1} relay   : ' + chalk.white(request.relayAction));
+    }
+
+    console.log('   \u{1F4A5} impact  : ' + chalk.yellow('Client received ret=1 (server error)'));
+    console.log(sep);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// v4.0 — CONFIG AUDIT
+// Checks configuration at startup for known issues.
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Audit server configuration at startup.
+ * Checks for known issues that could cause silent errors.
+ *
+ * @param {object} config - The server config object
+ * @returns {{ passed: number, issues: Array<object> }}
+ */
+function configAudit(config) {
+    if (!config) return { passed: 0, issues: [] };
+
+    var issues = [];
+    var checks = [
+        {
+            name: 'serverVersion',
+            check: function(c) { return c.serverVersion && c.serverVersion.length > 0; },
+            severity: 'error',
+            impact: 'Client displays no/wrong version info',
+            fix: 'config.serverVersion = "2026-05-15"',
+        },
+        {
+            name: 'serverId',
+            check: function(c) { return c.serverId !== undefined && c.serverId !== null; },
+            severity: 'error',
+            impact: 'Server selection will fail',
+            fix: 'config.serverId = 1 (number)',
+        },
+        {
+            name: 'serverId type',
+            check: function(c) { return typeof c.serverId === 'number' || typeof c.serverId === 'string'; },
+            severity: 'warn',
+            impact: 'Client parser expects number for serverId',
+            fix: 'Ensure config.serverId matches client expectation',
+        },
+        {
+            name: 'port',
+            check: function(c) { return c.port && c.port > 0 && c.port < 65536; },
+            severity: 'error',
+            impact: 'Server will not start',
+            fix: 'config.port = 8001',
+        },
+        {
+            name: 'teaKey',
+            check: function(c) { return c.teaKey && c.teaKey.length > 0; },
+            severity: 'warn',
+            impact: 'TEA verification disabled — security risk',
+            fix: 'config.teaKey = "verification" or custom key',
+        },
+        {
+            name: 'sdkUrl',
+            check: function(c) { return c.sdkUrl && c.sdkUrl.startsWith('http'); },
+            severity: 'warn',
+            impact: 'SDK-Server authentication will fail',
+            fix: 'config.sdkUrl = "http://127.0.0.1:9999"',
+        },
+        {
+            name: 'chatUrl',
+            check: function(c) { return c.chatUrl && c.chatUrl.startsWith('http') && !c.chatUrl.includes('127.0.0.1'); },
+            severity: 'warn',
+            impact: 'Chat won\'t work in production (hardcoded localhost)',
+            fix: 'Use process.env.CHAT_URL or env config',
+        },
+        {
+            name: 'dungeonUrl',
+            check: function(c) { return c.dungeonUrl && c.dungeonUrl.startsWith('http') && !c.dungeonUrl.includes('127.0.0.1'); },
+            severity: 'warn',
+            impact: 'Dungeon won\'t work in production (hardcoded localhost)',
+            fix: 'Use process.env.DUNGEON_URL or env config',
+        },
+        {
+            name: 'resourcePath',
+            check: function(c) { return c.resourcePath && typeof c.resourcePath === 'string'; },
+            severity: 'error',
+            impact: 'Resources will not load — game broken',
+            fix: 'config.resourcePath = "/path/to/resource/json"',
+        },
+        {
+            name: 'currency',
+            check: function(c) { return c.currency && typeof c.currency === 'string'; },
+            severity: 'warn',
+            impact: 'Currency display may be wrong',
+            fix: 'config.currency = "USD" or "CNY"',
+        },
+    ];
+
+    var passed = 0;
+    checks.forEach(function(c) {
+        var ok = c.check(config);
+        if (ok) {
+            passed++;
+        } else {
+            issues.push({
+                name: c.name,
+                severity: c.severity,
+                impact: c.impact,
+                fix: c.fix,
+            });
+        }
+    });
+
+    // Print audit results
+    if (issues.length === 0) {
+        log('INFO', 'AUDIT', '\u2705 Config audit passed: ' + passed + '/' + checks.length + ' checks OK');
+    } else {
+        var W = 62;
+        var warnSep = chalk.yellow('\u{26A0}\uFE0F\u2501'.repeat(Math.ceil(W / 2)).substring(0, W));
+
+        console.log('');
+        console.log(warnSep);
+        console.log(chalk.yellow.bold('  \u{1F6E1}\uFE0F  CONFIG AUDIT  ' + issues.length + ' issues at startup'));
+        console.log(warnSep);
+
+        issues.forEach(function(issue) {
+            var icon = issue.severity === 'error' ? '\u274C' : '\u26A0\uFE0F';
+            var nameColor = issue.severity === 'error' ? chalk.red : chalk.yellow;
+
+            console.log('   ' + icon + ' ' + nameColor(issue.name) + '  ' + chalk.gray(issue.name.includes('type') ? '\u{1F522}' : issue.name.includes('Url') ? '\u{1F3E0}' : '\u{1F4ED}'));
+            console.log('       \u{1F4CE} impact : ' + chalk.white(issue.impact));
+            console.log('       \u{1F527} fix    : ' + chalk.white(issue.fix));
+        });
+
+        console.log(warnSep);
+    }
+
+    return { passed: passed, issues: issues };
+}
+
+// ═══════════════════════════════════════════════════════════════
+// v4.0 — SERVER STARTUP BANNER
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Print the server startup banner with emoji per config item.
+ * @param {object} opts
+ * @param {string} opts.name        - Server name
+ * @param {number} opts.port        - Port number
+ * @param {string} opts.socketVersion - Socket.IO version
+ * @param {boolean} opts.teaEnabled - TEA on/off
+ * @param {string} opts.dbPath      - Database file path
+ * @import {string} opts.dbSize      - DB file size string
+ * @param {number} opts.dbRecords   - Number of DB records
+ * @param {string} opts.sdkUrl      - SDK-Server URL
+ * @param {number} opts.resourceCount - Number of resource JSONs
+ * @param {string} opts.resourceSize  - Total resource size string
+ * @param {string} opts.logLevel    - Current log level
+ */
+function serverBanner(opts) {
+    opts = opts || {};
+    var W = 62;
+
+    console.log('');
+    console.log(chalk.magenta('\u{1F3AE} \u2550'.repeat(W / 2).substring(0, W)));
+    console.log(chalk.magenta('\u{1F3AE}  \u{2694}\uFE0F  ') + chalk.magenta.bold(opts.name || 'SUPER WARRIOR Z \u2014 MAIN SERVER') + '  ' + chalk.magenta('v4.0'));
+    console.log(chalk.magenta('\u{1F3AE} \u2550'.repeat(W / 2).substring(0, W)));
+
+    var lines = [
+        ['\u{1F310}', 'Port', opts.port || '?'],
+        ['\u{1F4E1}', 'Socket.IO', opts.socketVersion || '?'],
+        ['\u{1F510}', 'TEA', opts.teaEnabled ? 'ON (verification)' : 'OFF'],
+        ['\u{1F4BE}', 'DB', (opts.dbPath || '?') + '  (' + (opts.dbSize || '?') + ' \u00B7 ' + (opts.dbRecords || '?') + ' records)'],
+        ['\u{1F310}', 'SDK API', opts.sdkUrl || '?'],
+        ['\u{1F4C2}', 'Resources', (opts.resourceCount || '?') + ' JSON  (' + (opts.resourceSize || '?') + ')'],
+        ['\u{1F4CA}', 'LOG_LEVEL', opts.logLevel || 'INFO'],
+    ];
+
+    lines.forEach(function(line) {
+        var key = chalk.white(line[1].padEnd(14));
+        console.log('\u{1F3AE}  ' + line[0] + ' ' + key + chalk.gray(line[2]));
+    });
+
+    console.log(chalk.magenta('\u{1F3AE} \u2550'.repeat(W / 2).substring(0, W)));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// v4.0 — TEA EVENT LOG
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Log TEA challenge send.
+ * @param {string} socketId - Socket ID (shortened)
+ * @param {string} challenge - UUID challenge string
+ */
+function teaChallenge(socketId, challenge) {
+    var sid = socketId ? chalk.white(socketId.substring(0, 8)) + chalk.gray('...') : chalk.gray('?');
+    console.log('');
+    console.log(chalk.magenta.bold('  \u{1F510}\u{1F511} Challenge \u2192 ') + sid);
+    console.log('              \u{1F3B2} ' + chalk.white(challenge));
+}
+
+/**
+ * Log TEA verification result.
+ * @param {string}  socketId  - Socket ID (shortened)
+ * @param {number}  duration  - Verification time in ms
+ * @param {string}  [from]    - Old transport
+ * @param {string}  [to]      - New transport
+ */
+function teaVerified(socketId, duration, from, to) {
+    var sid = socketId ? chalk.white(socketId.substring(0, 8)) + chalk.gray('...') : chalk.gray('?');
+    console.log(chalk.green.bold('  \u{1F510}\u2705 Verified  ') + sid + '  ' + chalk.cyan.bold('\u26A1 ' + duration + 'ms'));
+    if (from && to) {
+        console.log(chalk.cyan('  \u{1F504}\u2197\uFE0F Upgrade  ') + chalk.white(from + ' \u2192 ' + to) + '  \u{1F7E2}');
     }
 }
 
@@ -1524,22 +1663,60 @@ function phaseDivider(label) {
 // ═══════════════════════════════════════════════════════════════
 
 module.exports = {
+    // --- v4.0 NEW ---
+    generateReqId, getReqId, setReqId, clearReqId,
+    handlerOpen, handlerClose,
+    phaseBox, phase, phaseIcon,
+    payloadLog, assertLine, sectionLine,
+    warnCollapse,
+    fatalCapture, rejectionCapture, handlerCrash,
+    configAudit,
+    serverBanner,
+    teaChallenge, teaVerified,
+
+    // --- CORE ---
     log, detail, details,
+
+    // --- HEADERS ---
     header, headerThin, headerEnd, subHeader,
+    separator, separatorDouble,
+
+    // --- SOCKET ---
     socketEvent, actionLog,
-    timing, separator, separatorDouble,
+
+    // --- TIMING ---
+    timing,
+
+    // --- ERRORS ---
     errorWithStack, errorBanner, warnCallout,
+
+    // --- REQUEST/RESPONSE ---
     requestDump, responseSummary,
     dataPreview, table, fieldBuild,
+
+    // --- BOX ---
     boxOpen, boxLine, boxDetail, boxClose,
     boxHighlight, colorBox, boxTrace,
+
+    // --- TRACE ---
     traceRef, objectTree,
-    step, fieldMap,
-    categoryBreakdown,
+
+    // --- PIPELINE ---
+    step, fieldMap, categoryBreakdown,
+
+    // --- AUDIT ---
     criticalFields, summaryCard, fieldStatus, warningSection,
-    typeAssert, responseSnapshot, invariantCheck, mutationLog, deepTypeScan, saveVerify,
+
+    // --- VALIDATION ---
+    typeAssert, invariantCheck, mutationLog, deepTypeScan,
+
+    // --- SAVE ---
+    saveVerify, responseSnapshot,
+
+    // --- LEGACY HANDLER ---
     handlerDivider, phaseHeader, phaseDivider,
-    STATUS,
-    LEVELS, MODULES, DETAILS,
-    chalk
+
+    // --- CONFIG ---
+    STATUS, LEVELS, MODULES, DATA_EMOJI, PHASE_ICONS,
+    chalk,
 };
