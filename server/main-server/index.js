@@ -38,6 +38,7 @@ const bulletinHandlers = require('./handlers/user/getBulletinBrief');
 const friendServerAction = require('./handlers/friend/friendServerAction');
 const heroImageGetAll = require('./handlers/heroImage/getAll');
 const heroGetAttrs = require('./handlers/hero/getAttrs');
+const heroAutoLevelUp = require('./handlers/hero/autoLevelUp');
 const userMsgGetMsgList = require('./handlers/userMsg/getMsgList');
 const userMsgGetMsg = require('./handlers/userMsg/getMsg');
 const userMsgSendMsg = require('./handlers/userMsg/sendMsg');
@@ -399,7 +400,8 @@ const ACTION_HANDLERS = {
         getAll: heroImageGetAll
     },
     hero: {
-        getAttrs: heroGetAttrs
+        getAttrs: heroGetAttrs,
+        autoLevelUp: heroAutoLevelUp
     },
     userMsg: {
         getMsgList: userMsgGetMsgList,
