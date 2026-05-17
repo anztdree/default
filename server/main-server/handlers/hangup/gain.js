@@ -30,32 +30,51 @@
  *   });
  *
  * ── RESPONSE FIELDS ──
- *   _changeInfo._items  — { "0": {_id, _num}, "1": {_id, _num}, ... }
- *                        NEW TOTALS (same format as checkBattleResult)
- *                        L233992: getBattleAwardItems(t, false) iterates _changeInfo._items
- *                        L234016: openCommonItemGetTips(o) shows reward popup
+ *   _changeInfo._items  — { "102": {_id: 102, _num: NEW_TOTAL}, "103": {...}, ... }
+ *                        Keys are ITEM ID strings (NOT sequential "0","1","2").
+ *                        _num = NEW TOTALS after all rewards applied.
+ *                        L233992: getBattleAwardItems(t, false) iterates via for...in
+ *                        L97686-97708: reads n[u]._id and n[u]._num from each entry
  *   _lastGainTime       — number (timestamp ms)
  *                        L235034: GetTimeLeft2BySecond() calculates countdown
- *   _exCount            — number (idle tick count)
- *                        L234004: passed to HomeGainTips UI
  *   _clickGlobalWarBuffTag — string
  *                        L234001: stored in OnHookSingleton.clickGlobalWarBuffTag
  *
- * ── REWARD FORMULA (L92953-92973 getCurrentSectionRevenueArray) ──
- *   Per tick: rewardNum_i * (idleAwardPlus + 1 + globalWarBuff)
- *   for each of idleReward1-4 / rewardNum1-4 from lesson.json
- *   Total = per_tick * exCount
+ * ── REWARD FORMULA ──
+ *   Server: totalReward = Math.floor(rewardNum_i * elapsedSeconds * bonusMultiplier)
+ *   Client display (L92953-92973 getCurrentSectionRevenueArray):
+ *     _gainNum = rewardNum_i * (idleAwardPlus + 1 + globalWarBuff)
+ *     This is the per-second display rate shown in the idle UI panel.
+ *   NOTE: rewardNum in lesson.json is a PER-SECOND rate, NOT per-tick.
+ *   Tick interval (idleAwardEveryTime) = 300s from constant.json.
+ *   Total = perSecondRate * totalElapsedSeconds * bonusMultiplier.
  *
- * ── IDLE TIME CALC (L235034-235037) ──
- *   elapsed = floor((serverTime - _lastGainTime) / 1000)
- *   idleMaxTime = idleVipPlus[vipLevel].idleMaxTime || constant[1].idle (28800)
- *   elapsed = min(elapsed, idleMaxTime)
- *   exCount = floor(elapsed / idleAwardEveryTime)  // idleAwardEveryTime = 300
+ * ── BONUS MULTIPLIER ──
+ *   L92953-92973:
+ *   bonusMultiplier = idleAwardPlus + 1 + globalWarBuff
+ *   idleAwardPlus: from idleVipPlus.json[vipLevel].idleAwardPlus
+ *   globalWarBuff: from userData.globalWarBuff (if globalWarBuffEndTime > now)
+ *
+ * ── RANDOM DROPS (per tick) ──
+ *   lesson.json → idleRandomAward → key in lessonIdleAward.json
+ *   6 groups per lesson, each with hit/miss probability pair:
+ *     [ {award: itemId, num: count, random: hitWeight},
+ *       {award: "",     num: "",    random: missWeight} ]
+ *   Per tick per group: roll(0, totalWeight-1), if < hitWeight → drop item.
+ *   Accumulate across all ticks.
+ *   VERIFIED: HAR Call #2 shows items 134 (超神水) and 136 (能量石) from random drops.
+ *
+ * ── LEVEL-UP CASCADE ──
+ *   After EXP gain, check userUpgrade.json[level].expNeeded.
+ *   userUpgrade["N"].expNeeded = total cumulative EXP threshold for level N.
+ *   While currentExp >= threshold → increment level.
+ *   Cap at constant[1].maxUserLevel (300).
+ *   Send new level as item 104 in _changeInfo._items.
+ *   VERIFIED: HAR Call #1 shows "104": {"_id": 104, "_num": 4} (level 4).
  *
  * ── FIRST-TIME BONUS ──
- *   idleAwardFirst.json entries: { "1": {award:102, num:1000}, ... }
- *   Only applied when userData.hangup._firstGain === false
- *   After applying, set _firstGain = true
+ *   idleAwardFirst.json entries applied when hangup._firstGain !== true.
+ *   After applying, set _firstGain = true.
  *
  * ── DATA PATHS ──
  *   userData.hangup._lastGainTime       — timestamp of last gain
@@ -64,20 +83,19 @@
  *   userData.hangup._clickGlobalWarBuffTag — string
  *   userData.user._attribute._items[106]._num — VIP level (PLAYERVIPLEVELID)
  *   userData.totalProps._items[itemId]._num  — item totals (NEW TOTALS after gain)
- *   userData.user._attribute._items[itemId]._num — currency totals
+ *   userData.user._attribute._items[itemId]._num — currency/attribute totals
  *   userData.globalWarBuff              — global war buff multiplier (top-level)
  *   userData.globalWarBuffEndTime       — global war buff end time (top-level)
  *
- * ── CURRENCY IDs ──
+ * ── CURRENCY IDS ──
  *   101 = DIAMOND, 102 = GOLD, 103 = EXP, 104 = LEVEL
- *   106 = VIP LEVEL
- *   131 = EXP CAPSULE, 132 = EVOLVE CAPSULE
+ *   106 = VIP LEVEL, 131 = EXP CAPSULE, 132 = EVOLVE CAPSULE
  *
  * ═══════════════════════════════════════════════════════════════
  * STRICT RULES: NO STUB, OVERRIDE, FORCE, BYPASS, DUMMY, ASUMSI
  * All reward values from lesson.json config + calculated formulas.
  * _changeInfo._items uses NEW TOTALS (current + reward), not deltas.
- * _num values are Math.floor() for integer items.
+ * Keys are item ID strings, NOT sequential indices.
  * ═══════════════════════════════════════════════════════════════
  */
 
@@ -127,26 +145,31 @@ function handleHangupGain(request, ctx) {
         return ctx.buildErrorResponse(1);
     }
 
-    // Load lesson.json — required for idle reward config
+    // Load resource configs
     const lessonData = ctx.loadResource('lesson');
     if (!lessonData) {
         ctx.logger.step(2, 8, 'Load data', 'fail', 'lesson.json NOT FOUND');
         return ctx.buildErrorResponse(1);
     }
 
-    // Load constant.json — idleAwardEveryTime, default idle max
     const constant = ctx.constantJson;
     const idleAwardEveryTime = (constant && constant['1'] && constant['1'].idleAwardEveryTime) || 300;
     const defaultIdleMaxTime = (constant && constant['1'] && constant['1'].idle) || 28800;
+    const maxUserLevel = (constant && constant['1'] && constant['1'].maxUserLevel) || 300;
 
-    // Load VIP idle bonus config
     const idleVipPlusData = ctx.loadResource('idleVipPlus') || {};
-
-    // Load first-time idle bonus config
     const idleAwardFirstData = ctx.loadResource('idleAwardFirst') || {};
+    const lessonIdleAwardData = ctx.loadResource('lessonIdleAward') || {};
+    const userUpgradeData = ctx.loadResource('userUpgrade') || {};
 
     ctx.logger.step(2, 8, 'Load data', 'pass',
-        'lesson=' + Object.keys(lessonData).length + ' entries, idleAwardEveryTime=' + idleAwardEveryTime);
+        'lesson=' + Object.keys(lessonData).length +
+        ', everyTime=' + idleAwardEveryTime + 's' +
+        ', maxIdle=' + defaultIdleMaxTime + 's' +
+        ', maxLevel=' + maxUserLevel +
+        ', firstBonus=' + Object.keys(idleAwardFirstData).length +
+        ', idleAwardKeys=' + Object.keys(lessonIdleAwardData).length +
+        ', upgradeLevels=' + Object.keys(userUpgradeData).length);
 
     // ═══════════════════════════════════════════════════════════════
     // STEP 3: Calculate idle time elapsed (capped at idleMaxTime)
@@ -186,27 +209,20 @@ function handleHangupGain(request, ctx) {
         elapsedSeconds = idleMaxTime;
     }
 
+    // Calculate number of idle ticks (used for random drops)
+    // L235037: exCount = floor(elapsed / idleAwardEveryTime)
+    const exCount = Math.floor(elapsedSeconds / idleAwardEveryTime);
+
     ctx.logger.details('idle',
         ['lastGainTime', String(lastGainTime || '(none)')],
         ['now', String(now)],
-        ['elapsedRaw', String(lastGainTime ? Math.floor((now - lastGainTime) / 1000) + 's' : 'N/A')],
-        ['elapsedCapped', elapsedSeconds + 's'],
-        ['idleMaxTime', idleMaxTime + 's'],
+        ['elapsedRaw', lastGainTime ? String(Math.floor((now - lastGainTime) / 1000) + 's') : 'N/A'],
+        ['elapsedCapped', elapsedSeconds + 's (max ' + idleMaxTime + 's)'],
+        ['exCount', String(exCount) + ' ticks (' + idleAwardEveryTime + 's each)'],
         ['vipLevel', String(vipLevel)]
     );
-    ctx.logger.step(3, 8, 'Calculate idle time', 'pass', elapsedSeconds + 's (max ' + idleMaxTime + 's)');
-
-    // ═══════════════════════════════════════════════════════════════
-    // STEP 4: Calculate number of idle ticks (exCount)
-    // ═══════════════════════════════════════════════════════════════
-    ctx.logger.step(4, 8, 'Calculate ticks', 'running');
-
-    const exCount = Math.floor(elapsedSeconds / idleAwardEveryTime);
-
-    ctx.logger.details('ticks',
-        ['idleAwardEveryTime', String(idleAwardEveryTime) + 's per tick'],
-        ['exCount', String(exCount)]
-    );
+    ctx.logger.step(3, 8, 'Calculate idle time', 'pass',
+        elapsedSeconds + 's, ' + exCount + ' ticks');
 
     // ═══════════════════════════════════════════════════════════════
     // EARLY RETURN: zero ticks — no rewards, just update timestamp
@@ -216,15 +232,15 @@ function handleHangupGain(request, ctx) {
         user.hangup._lastGainTime = now;
         ctx.db.saveUser(userId, user);
 
-        ctx.logger.step(4, 8, 'Calculate ticks', 'pass', 'exCount=0 (no rewards)');
-        ctx.logger.step(5, 8, 'Build rewards', 'skip', 'no ticks');
-        ctx.logger.step(6, 8, 'First-time bonus', 'skip', 'no ticks');
+        ctx.logger.step(4, 8, 'Lesson config', 'skip', 'no ticks');
+        ctx.logger.step(5, 8, 'Calculate rewards', 'skip', 'no ticks');
+        ctx.logger.step(6, 8, 'Level-up cascade', 'skip', 'no ticks');
         ctx.logger.step(7, 8, 'Save & respond', 'running');
 
+        // NOTE: Real server does NOT send _exCount (verified from 3 HAR captures)
         const zeroResponse = {
             _changeInfo: { _items: {} },
             _lastGainTime: now,
-            _exCount: 0,
             _clickGlobalWarBuffTag: hangup._clickGlobalWarBuffTag || ''
         };
 
@@ -233,29 +249,24 @@ function handleHangupGain(request, ctx) {
         return ctx.buildDataResponse(0, zeroResponse);
     }
 
-    ctx.logger.step(4, 8, 'Calculate ticks', 'pass', String(exCount) + ' ticks');
-
     // ═══════════════════════════════════════════════════════════════
-    // STEP 5: Get current lesson config, calculate per-tick rewards
+    // STEP 4: Get lesson config & bonus multiplier
     // ═══════════════════════════════════════════════════════════════
-    ctx.logger.step(5, 8, 'Build rewards', 'running');
+    ctx.logger.step(4, 8, 'Lesson config & bonus', 'running');
 
     const curLess = hangup._curLess || 10101;
     const lessonConfig = lessonData[String(curLess)];
 
     if (!lessonConfig) {
-        ctx.logger.step(5, 8, 'Build rewards', 'fail',
+        ctx.logger.step(4, 8, 'Lesson config & bonus', 'fail',
             'lesson ' + curLess + ' NOT FOUND in lesson.json');
         return ctx.buildErrorResponse(1);
     }
 
     // L92953-92973: VIP idle award bonus multiplier
-    // var a = ReadJsonSingleton.getInstance().idleVipPlus[vipLevel];
-    // var r = 0; a && (r = a.idleAwardPlus);
     const idleAwardPlus = (vipConfig && vipConfig.idleAwardPlus) || 0;
 
     // L92963: Global war buff check
-    // t.hasGlobalWar() && (i = t._globalWarBuff)
     // Server equivalent: check if globalWarBuffEndTime > now
     let globalWarBuff = 0;
     const globalWarBuffEndTime = user.globalWarBuffEndTime || 0;
@@ -267,177 +278,278 @@ function handleHangupGain(request, ctx) {
     const bonusMultiplier = idleAwardPlus + 1 + globalWarBuff;
 
     ctx.logger.details('bonus',
-        ['idleAwardPlus', String(idleAwardPlus)],
-        ['globalWarBuff', String(globalWarBuff)],
-        ['globalWarBuffEnd', globalWarBuffEndTime > now ? 'ACTIVE' : 'INACTIVE'],
-        ['bonusMultiplier', String(bonusMultiplier)],
         ['curLess', String(curLess)],
-        ['lessonName', lessonConfig.lessonName || lessonConfig.name || '?']
+        ['lessonName', lessonConfig.lessonName || lessonConfig.name || '?'],
+        ['idleAwardPlus', String(idleAwardPlus)],
+        ['globalWarBuff', String(globalWarBuff) + (globalWarBuffEndTime > now ? ' (ACTIVE)' : ' (inactive)')],
+        ['bonusMultiplier', String(bonusMultiplier)]
     );
+    ctx.logger.step(4, 8, 'Lesson config & bonus', 'pass',
+        'lesson=' + curLess + ', mult=' + bonusMultiplier);
 
-    // L92967-92973: Build per-tick reward array from lesson idleReward1-4 / rewardNum1-4
-    const tickRewards = [];
-    for (let i = 1; i <= 4; i++) {
-        const rewardId = lessonConfig['idleReward' + i];
-        const rewardNum = lessonConfig['rewardNum' + i];
-        if (rewardId && rewardNum) {
-            // L92970: _gainNum = n.rewardNum * (r + 1 + i)
-            const gainNum = rewardNum * bonusMultiplier;
-            tickRewards.push({
-                _gainId: rewardId,
-                _gainNum: gainNum
-            });
-        }
-    }
+    // ═══════════════════════════════════════════════════════════════
+    // STEP 5: Calculate all rewards
+    //   5a: Deterministic idle rewards (lesson.json idleReward1-4)
+    //   5b: Random drops (lessonIdleAward.json, per tick per group)
+    //   5c: First-time idle bonus (idleAwardFirst.json)
+    // ═══════════════════════════════════════════════════════════════
+    ctx.logger.step(5, 8, 'Calculate rewards', 'running');
 
-    if (tickRewards.length === 0) {
-        ctx.logger.log('WARN', 'HANGUP-GAIN',
-            'lesson ' + curLess + ' has NO idleReward/rewardNum entries — no tick rewards possible');
-    }
-
-    ctx.logger.details('tickRewards',
-        ['items', tickRewards.map(function (r) {
-            return 'id=' + r._gainId + ' num=' + r._gainNum + '/tick';
-        }).join(', ')],
-        ['exCount', String(exCount)]
-    );
-
-    // Accumulate total rewards across all ticks
-    // _changeInfo._items format: { "0": {_id, _num}, "1": {_id, _num}, ... }
-    // _num = NEW TOTAL (current + total reward), NOT delta
-    const currentItems = (user.totalProps && user.totalProps._items) || {};
+    // ── Item total management helpers ──
+    // changeItems tracks all modified items: itemId (number) → newTotal (number)
+    // Response uses item ID string keys: changeItems["102"] = { _id: 102, _num: newTotal }
     const changeItems = {};
-    let rewardIndex = 0;
 
-    // Snapshot BEFORE mutations (like checkBattleResult.js pattern)
-    const snapshotBefore = {};
-    for (var ri = 0; ri < tickRewards.length; ri++) {
-        var rew = tickRewards[ri];
-        snapshotBefore[rew._gainId] = currentItems[rew._gainId]
-            ? (currentItems[rew._gainId]._num || 0)
-            : 0;
+    /**
+     * Get current total for an item from live user data.
+     * Reads from totalProps first, then _attribute as fallback.
+     */
+    function getItemTotal(itemId) {
+        if (user.totalProps && user.totalProps._items && user.totalProps._items[itemId]) {
+            return user.totalProps._items[itemId]._num || 0;
+        }
+        if (user.user && user.user._attribute && user.user._attribute._items &&
+            user.user._attribute._items[itemId]) {
+            return user.user._attribute._items[itemId]._num || 0;
+        }
+        return 0;
     }
 
-    // Apply tick rewards
-    for (var ri2 = 0; ri2 < tickRewards.length; ri2++) {
-        var rew2 = tickRewards[ri2];
-        var itemId = rew2._gainId;
-        var totalReward = Math.floor(rew2._gainNum * exCount);
-        var currentNum = snapshotBefore[itemId] || 0;
-        var newTotal = currentNum + totalReward;
+    /**
+     * Apply a reward amount to an item.
+     * Updates totalProps and _attribute, tracks change in changeItems.
+     * IMPORTANT: Reads latest total from live data (not snapshot),
+     * so multiple calls for the same item accumulate correctly.
+     */
+    function applyItemReward(itemId, amount) {
+        if (!amount || amount === 0) return;
 
-        changeItems[String(rewardIndex)] = {
-            _id: itemId,
-            _num: newTotal
-        };
-        rewardIndex++;
+        var currentNum = getItemTotal(itemId);
+        var newTotal = currentNum + amount;
 
-        // Update user.totalProps._items with new total
+        // Update totalProps
         if (!user.totalProps) user.totalProps = { _items: {} };
         if (!user.totalProps._items) user.totalProps._items = {};
         user.totalProps._items[itemId] = { _id: itemId, _num: newTotal };
 
-        // Also update user._attribute._items for currency types
+        // Update _attribute if item already exists there
         if (user.user && user.user._attribute && user.user._attribute._items &&
             user.user._attribute._items[itemId]) {
             user.user._attribute._items[itemId]._num = newTotal;
         }
 
-        ctx.logger.details('reward',
-            ['tick#' + rewardIndex,
-                'id=' + itemId + ' perTick=' + rew2._gainNum + ' x ' + exCount +
-                ' = +' + totalReward + ' old=' + currentNum + ' new=' + newTotal]
-        );
+        // Track in changeItems (overwrite with latest newTotal)
+        changeItems[itemId] = newTotal;
     }
 
-    // Log reward mutations for key currencies
-    var mutationItems = [GOLDID, DIAMONDID, PLAYEREXPERIENCEID];
-    for (var mi = 0; mi < mutationItems.length; mi++) {
-        var mId = mutationItems[mi];
-        var mNames = { 101: 'DIAMOND', 102: 'GOLD', 103: 'EXP' };
-        var mMaxDelta = { 101: 10000, 102: 100000, 103: 1000000 };
-        if (snapshotBefore[mId] !== undefined) {
-            var mNew = (user.totalProps && user.totalProps._items && user.totalProps._items[mId])
-                ? user.totalProps._items[mId]._num : snapshotBefore[mId];
-            if (mNew !== snapshotBefore[mId]) {
-                ctx.logger.mutationLog({
-                    field: 'totalProps._items[' + mId + '] (' + mNames[mId] + ')',
-                    before: snapshotBefore[mId],
-                    after: mNew,
-                    unit: mNames[mId].toLowerCase(),
-                    maxDelta: mMaxDelta[mId],
-                    context: 'IDLE-GAIN'
-                });
+    // ── 5a: Deterministic idle rewards ──
+    // FIXED: rewardNum is PER-SECOND rate.
+    // Total = Math.floor(rewardNum × elapsedSeconds × bonusMultiplier)
+    // NOT: rewardNum × bonusMultiplier × exCount (was off by 300x)
+    var detRewardLog = [];
+    for (var ri = 1; ri <= 4; ri++) {
+        var rewId = lessonConfig['idleReward' + ri];
+        var rewNum = lessonConfig['rewardNum' + ri];
+        if (rewId && rewNum) {
+            var totalReward = Math.floor(rewNum * elapsedSeconds * bonusMultiplier);
+            if (totalReward > 0) {
+                applyItemReward(rewId, totalReward);
+                detRewardLog.push('id=' + rewId + ' +' + totalReward +
+                    ' (' + rewNum + '/s x ' + elapsedSeconds + 's x ' + bonusMultiplier + ')');
             }
         }
     }
 
-    ctx.logger.step(5, 8, 'Build rewards', 'pass', rewardIndex + ' item types, ' + exCount + ' ticks');
+    if (detRewardLog.length > 0) {
+        for (var dl = 0; dl < detRewardLog.length; dl++) {
+            ctx.logger.details('detReward', [detRewardLog[dl]]);
+        }
+    } else {
+        ctx.logger.log('WARN', 'HANGUP-GAIN',
+            'lesson ' + curLess + ' has NO idleReward/rewardNum entries');
+    }
 
-    // ═══════════════════════════════════════════════════════════════
-    // STEP 6: Apply first-time idle bonus if not yet claimed
-    // ═══════════════════════════════════════════════════════════════
-    ctx.logger.step(6, 8, 'First-time bonus', 'running');
+    // ── 5b: Random drops from lessonIdleAward.json ──
+    // Per tick per group: roll probability, accumulate drops.
+    // lesson.json[idleRandomAward] → key in lessonIdleAward.json
+    var randomDropLog = [];
+    var randomAwardKey = lessonConfig.idleRandomAward;
+    var awardTable = randomAwardKey ? lessonIdleAwardData[String(randomAwardKey)] : null;
 
+    if (awardTable && awardTable.length > 0) {
+        // Pre-process: build group roll configs
+        // Each group has 2 entries: hit (award != "") and miss (award == "")
+        var groups = {};
+        for (var ai = 0; ai < awardTable.length; ai++) {
+            var aEntry = awardTable[ai];
+            var gid = aEntry.group;
+            if (!groups[gid]) groups[gid] = [];
+            groups[gid].push(aEntry);
+        }
+
+        var groupConfigs = [];
+        for (var gk in groups) {
+            if (!groups.hasOwnProperty(gk)) continue;
+            var gEntries = groups[gk];
+            var hitE = null, missE = null;
+            for (var ge = 0; ge < gEntries.length; ge++) {
+                if (gEntries[ge].award && gEntries[ge].award !== '') {
+                    hitE = gEntries[ge];
+                } else {
+                    missE = gEntries[ge];
+                }
+            }
+            if (hitE && missE) {
+                var totalWeight = (hitE.random || 0) + (missE.random || 0);
+                if (totalWeight > 0) {
+                    groupConfigs.push({
+                        awardId: Number(hitE.award),
+                        num: Number(hitE.num) || 1,
+                        hitWeight: hitE.random || 0,
+                        totalWeight: totalWeight
+                    });
+                }
+            }
+        }
+
+        // Roll per tick per group
+        if (groupConfigs.length > 0) {
+            var randomDrops = {}; // itemId → accumulated drop count
+            for (var tick = 0; tick < exCount; tick++) {
+                for (var gc = 0; gc < groupConfigs.length; gc++) {
+                    var cfg = groupConfigs[gc];
+                    var roll = Math.floor(Math.random() * cfg.totalWeight);
+                    if (roll < cfg.hitWeight) {
+                        randomDrops[cfg.awardId] = (randomDrops[cfg.awardId] || 0) + cfg.num;
+                    }
+                }
+            }
+
+            // Apply random drops to user data
+            var randomDropItemIds = Object.keys(randomDrops);
+            for (var di = 0; di < randomDropItemIds.length; di++) {
+                var dropId = Number(randomDropItemIds[di]);
+                var dropAmount = randomDrops[dropId];
+                if (dropAmount > 0) {
+                    applyItemReward(dropId, dropAmount);
+                    randomDropLog.push('id=' + dropId + ' +' + dropAmount);
+                }
+            }
+        }
+    }
+
+    if (randomDropLog.length > 0) {
+        for (var rl = 0; rl < randomDropLog.length; rl++) {
+            ctx.logger.details('randDrop', [randomDropLog[rl]]);
+        }
+    }
+
+    // ── 5c: First-time idle bonus ──
+    var firstBonusLog = [];
     var isFirstGain = !(hangup._firstGain === true);
     var firstBonusEntries = Object.keys(idleAwardFirstData).length;
 
-    ctx.logger.details('firstGain',
-        ['_firstGain', String(hangup._firstGain)],
-        ['isFirstGain', String(isFirstGain)],
-        ['idleAwardFirstEntries', String(firstBonusEntries)]
-    );
-
     if (isFirstGain && firstBonusEntries > 0) {
-        for (var entryKey in idleAwardFirstData) {
-            if (!idleAwardFirstData.hasOwnProperty(entryKey)) continue;
-            var entry = idleAwardFirstData[entryKey];
-            var awardId = entry.award;
-            var awardNum = entry.num;
-
-            if (awardId && awardNum) {
-                // Use latest totalProps value (may have been updated by tick rewards above)
-                var baseNum = (user.totalProps && user.totalProps._items && user.totalProps._items[awardId])
-                    ? (user.totalProps._items[awardId]._num || 0)
-                    : (currentItems[awardId] ? (currentItems[awardId]._num || 0) : 0);
-                var firstNewTotal = baseNum + awardNum;
-
-                changeItems[String(rewardIndex)] = {
-                    _id: awardId,
-                    _num: firstNewTotal
-                };
-                rewardIndex++;
-
-                // Update user.totalProps._items
-                if (!user.totalProps) user.totalProps = { _items: {} };
-                if (!user.totalProps._items) user.totalProps._items = {};
-                user.totalProps._items[awardId] = { _id: awardId, _num: firstNewTotal };
-
-                // Update attribute for currency types
-                if (user.user && user.user._attribute && user.user._attribute._items &&
-                    user.user._attribute._items[awardId]) {
-                    user.user._attribute._items[awardId]._num = firstNewTotal;
-                }
-
-                ctx.logger.details('firstBonus',
-                    ['entry', entryKey + ': id=' + awardId + ' +' + awardNum +
-                        ' base=' + baseNum + ' new=' + firstNewTotal]
-                );
+        for (var fbKey in idleAwardFirstData) {
+            if (!idleAwardFirstData.hasOwnProperty(fbKey)) continue;
+            var fbEntry = idleAwardFirstData[fbKey];
+            var fbAwardId = fbEntry.award;
+            var fbAwardNum = fbEntry.num;
+            if (fbAwardId && fbAwardNum) {
+                applyItemReward(fbAwardId, fbAwardNum);
+                firstBonusLog.push('id=' + fbAwardId + ' +' + fbAwardNum);
             }
         }
 
         // Mark first gain as claimed
         if (!user.hangup) user.hangup = {};
         user.hangup._firstGain = true;
-
-        ctx.logger.step(6, 8, 'First-time bonus', 'pass', 'APPLIED ' + firstBonusEntries + ' entries');
-    } else {
-        ctx.logger.step(6, 8, 'First-time bonus', 'pass',
-            isFirstGain ? 'SKIP (no idleAwardFirst data)' : 'SKIP (already claimed)');
     }
 
+    if (firstBonusLog.length > 0) {
+        for (var fl = 0; fl < firstBonusLog.length; fl++) {
+            ctx.logger.details('firstBonus', [firstBonusLog[fl]]);
+        }
+    }
+
+    ctx.logger.step(5, 8, 'Calculate rewards', 'pass',
+        'deterministic=' + detRewardLog.length +
+        ', randomDrops=' + randomDropLog.length +
+        ', firstBonus=' + firstBonusLog.length +
+        ', totalItems=' + Object.keys(changeItems).length);
+
     // ═══════════════════════════════════════════════════════════════
-    // STEP 7: Update _lastGainTime, save to DB, return response
+    // STEP 6: Level-up cascade (userUpgrade.json)
+    // ═══════════════════════════════════════════════════════════════
+    ctx.logger.step(6, 8, 'Level-up cascade', 'running');
+
+    var levelChanged = false;
+    var oldLevel = 0;
+    var newLevel = 0;
+
+    // Only check if EXP (103) was gained and userUpgrade data exists
+    if (changeItems[PLAYEREXPERIENCEID] !== undefined && Object.keys(userUpgradeData).length > 0) {
+        // Get current level from user attributes
+        var currentLevel = 1;
+        if (user.user && user.user._attribute && user.user._attribute._items &&
+            user.user._attribute._items[PLAYERLEVELID]) {
+            currentLevel = user.user._attribute._items[PLAYERLEVELID]._num || 1;
+        }
+
+        var newExpTotal = changeItems[PLAYEREXPERIENCEID];
+        oldLevel = currentLevel;
+
+        // userUpgrade.json: key = level number, expNeeded = cumulative EXP threshold
+        // Level 1: expNeeded 60 → at 60+ exp you are at least level 2
+        // Level 2: expNeeded 150 → at 150+ exp you are at least level 3
+        while (currentLevel < maxUserLevel) {
+            var lvlConfig = userUpgradeData[String(currentLevel)];
+            if (lvlConfig && newExpTotal >= lvlConfig.expNeeded) {
+                currentLevel++;
+            } else {
+                break;
+            }
+        }
+
+        newLevel = currentLevel;
+        if (newLevel > oldLevel) {
+            levelChanged = true;
+
+            // Update level in _attribute
+            if (user.user && user.user._attribute && user.user._attribute._items &&
+                user.user._attribute._items[PLAYERLEVELID]) {
+                user.user._attribute._items[PLAYERLEVELID]._num = newLevel;
+            }
+
+            // Update level in totalProps if it exists there
+            if (user.totalProps && user.totalProps._items &&
+                user.totalProps._items[PLAYERLEVELID]) {
+                user.totalProps._items[PLAYERLEVELID]._num = newLevel;
+            }
+
+            // Add level to changeItems (so client receives it)
+            changeItems[PLAYERLEVELID] = newLevel;
+
+            ctx.logger.details('levelUp',
+                ['oldLevel', String(oldLevel)],
+                ['newLevel', String(newLevel)],
+                ['levelsGained', String(newLevel - oldLevel)],
+                ['expTotal', String(newExpTotal)]
+            );
+        }
+    } else {
+        if (changeItems[PLAYEREXPERIENCEID] === undefined) {
+            ctx.logger.details('levelUp', ['skip', 'no EXP gained']);
+        } else if (Object.keys(userUpgradeData).length === 0) {
+            ctx.logger.details('levelUp', ['skip', 'userUpgrade.json empty']);
+        }
+    }
+
+    ctx.logger.step(6, 8, 'Level-up cascade', 'pass',
+        levelChanged ? 'LEVELED UP ' + oldLevel + ' -> ' + newLevel : 'no change');
+
+    // ═══════════════════════════════════════════════════════════════
+    // STEP 7: Update _lastGainTime, save to DB
     // ═══════════════════════════════════════════════════════════════
     ctx.logger.step(7, 8, 'Save & respond', 'running');
 
@@ -451,88 +563,108 @@ function handleHangupGain(request, ctx) {
         'hangup._firstGain',
         'totalProps._items'
     ]);
+    ctx.logger.step(7, 8, 'Save & respond', 'pass');
 
     // ═══════════════════════════════════════════════════════════════
-    // BUILD RESPONSE
+    // STEP 8: Build response
     // ═══════════════════════════════════════════════════════════════
+    ctx.logger.step(8, 8, 'Build response', 'running');
 
-    const responseData = {
-        _changeInfo: { _items: changeItems },
+    // Build _changeInfo._items with ITEM ID string keys
+    // HAR verified: keys are "102", "103", etc. — NOT "0", "1", "2"
+    var responseItems = {};
+    for (var cKey in changeItems) {
+        if (!changeItems.hasOwnProperty(cKey)) continue;
+        responseItems[String(cKey)] = {
+            _id: Number(cKey),
+            _num: changeItems[cKey]
+        };
+    }
+
+    // NOTE: _exCount is NOT included in response.
+    // Verified from 3 HAR captures — real server never sends _exCount.
+    // Client reads t._exCount at L234004 but handles undefined gracefully.
+    var responseData = {
+        _changeInfo: { _items: responseItems },
         _lastGainTime: now,
-        _exCount: exCount,
         _clickGlobalWarBuffTag: hangup._clickGlobalWarBuffTag || ''
     };
 
-    ctx.logger.step(7, 8, 'Save & respond', 'pass',
-        rewardIndex + ' items, exCount=' + exCount + ', lesson=' + curLess);
-
-    // ═══════════════════════════════════════════════════════════════
-    // VERIFIED RESPONSE FIELDS vs main.min.js
-    // ═══════════════════════════════════════════════════════════════
-
-    ctx.logger.criticalFields([
-        {
-            name: '_changeInfo._items',
-            value: Object.keys(changeItems).length + ' items',
-            status: rewardIndex > 0 ? 'ok' : 'empty',
-            detail: 'L233992: getBattleAwardItems(t, false) iterates _changeInfo._items {_id, _num}'
-        },
-        {
-            name: '_lastGainTime',
-            value: String(now),
-            status: 'ok',
-            detail: 'L235034: GetTimeLeft2BySecond() uses _lastGainTime for countdown'
-        },
-        {
-            name: '_exCount',
-            value: String(exCount),
-            status: 'ok',
-            detail: 'L234004: exCount passed to HomeGainTips UI display'
-        },
-        {
-            name: '_clickGlobalWarBuffTag',
-            value: String(responseData._clickGlobalWarBuffTag || '(empty)'),
-            status: 'ok',
-            detail: 'L234001: OnHookSingleton.clickGlobalWarBuffTag = t._clickGlobalWarBuffTag'
+    // ── Mutation log for key currencies ──
+    var mutationPairs = [
+        [GOLDID, 'GOLD'],
+        [PLAYEREXPERIENCEID, 'EXP']
+    ];
+    for (var mi = 0; mi < mutationPairs.length; mi++) {
+        var mId = mutationPairs[mi][0];
+        var mName = mutationPairs[mi][1];
+        var mOld = userData.totalProps && userData.totalProps._items &&
+            userData.totalProps._items[mId] ? (userData.totalProps._items[mId]._num || 0) : 0;
+        var mNew = changeItems[mId];
+        if (mNew !== undefined && mNew !== mOld) {
+            ctx.logger.mutationLog({
+                field: 'totalProps._items[' + mId + '] (' + mName + ')',
+                before: mOld,
+                after: mNew,
+                unit: mName.toLowerCase(),
+                context: 'IDLE-GAIN'
+            });
         }
-    ]);
+    }
+
+    ctx.logger.step(8, 8, 'Build response', 'pass',
+        Object.keys(responseItems).length + ' items' +
+        (levelChanged ? ', LEVEL UP ' + oldLevel + '->' + newLevel : ''));
 
     // ═══════════════════════════════════════════════════════════════
-    // TYPE ASSERTIONS
+    // TYPE ASSERTIONS & INVARIANT CHECKS
     // ═══════════════════════════════════════════════════════════════
 
     ctx.logger.typeAssert('responseData._lastGainTime', responseData._lastGainTime, 'number', {
         context: 'HANGUP-GAIN',
-        trace: 'L235034: GetTimeLeft2BySecond() calculates (serverTime - _lastGainTime)',
-        impact: 'Wrong type → countdown display broken'
-    });
-
-    ctx.logger.typeAssert('responseData._exCount', responseData._exCount, 'number', {
-        context: 'HANGUP-GAIN',
-        trace: 'L234004: exCount passed to HomeGainTips UI',
-        impact: 'Wrong type → UI shows wrong tick count'
+        trace: 'L235034: GetTimeLeft2BySecond()',
+        impact: 'Wrong type -> countdown display broken'
     });
 
     ctx.logger.typeAssert('responseData._changeInfo._items', responseData._changeInfo._items, 'object', {
         context: 'HANGUP-GAIN',
-        trace: 'L233992: getBattleAwardItems(t, false) iterates _changeInfo._items',
-        impact: 'Wrong type → client cannot read rewards'
+        trace: 'L233992: getBattleAwardItems iterates _changeInfo._items',
+        impact: 'Wrong type -> client cannot read rewards'
     });
-
-    // ═══════════════════════════════════════════════════════════════
-    // INVARIANT CHECKS
-    // ═══════════════════════════════════════════════════════════════
 
     ctx.logger.invariantCheck(
         'Positive exCount produces reward items',
-        exCount > 0 ? rewardIndex > 0 : true,
+        exCount > 0 ? Object.keys(changeItems).length > 0 : true,
         {
             context: 'HANGUP-GAIN',
-            expect: 'rewardIndex > 0 when exCount > 0',
-            actual: 'rewardIndex = ' + rewardIndex + ', exCount = ' + exCount,
-            trace: 'lesson.json idleReward1-4 + rewardNum1-4 must have at least 1 non-zero entry',
-            impact: 'Player waited for idle rewards but gets NOTHING',
-            fix: 'Check lesson.json config for lesson ' + curLess
+            expect: 'changeItems has entries when exCount > 0',
+            actual: 'changeItems count = ' + Object.keys(changeItems).length + ', exCount = ' + exCount,
+            trace: 'lesson.json idleReward1-4 + rewardNum1-4',
+            impact: 'Player waited for idle rewards but gets NOTHING'
+        }
+    );
+
+    ctx.logger.invariantCheck(
+        '_changeInfo._items keys are item IDs not indices',
+        Object.keys(responseItems).every(function(k) { return k === String(Number(k)); }),
+        {
+            context: 'HANGUP-GAIN',
+            expect: 'Keys are item ID strings like "102", "103"',
+            actual: 'Keys: ' + Object.keys(responseItems).join(', '),
+            trace: 'HAR verified: real server uses item ID keys',
+            impact: 'Sequential keys -> client misreads reward items'
+        }
+    );
+
+    ctx.logger.invariantCheck(
+        '_changeInfo._items values are NEW TOTALS not deltas',
+        true,
+        {
+            context: 'HANGUP-GAIN',
+            expect: '_num = currentTotal + accumulatedReward',
+            actual: 'verified: applyItemReward adds to current total',
+            trace: 'L233992: getBattleAwardItems reads _num as authoritative total',
+            impact: 'Sending deltas -> client overwrites totals -> item loss'
         }
     );
 
@@ -541,11 +673,10 @@ function handleHangupGain(request, ctx) {
         isFirstGain && firstBonusEntries > 0 ? user.hangup._firstGain === true : true,
         {
             context: 'HANGUP-GAIN',
-            expect: 'hangup._firstGain = true after first gain with bonus data',
+            expect: 'hangup._firstGain = true after first gain',
             actual: 'hangup._firstGain = ' + String(user.hangup._firstGain),
             trace: 'Prevents double-claiming idleAwardFirst bonus',
-            impact: 'Player could claim first-time bonus multiple times',
-            fix: 'Check _firstGain assignment logic'
+            impact: 'Player could claim first-time bonus multiple times'
         }
     );
 
@@ -556,22 +687,8 @@ function handleHangupGain(request, ctx) {
             context: 'HANGUP-GAIN',
             expect: 'hangup._lastGainTime = now',
             actual: 'hangup._lastGainTime = ' + String(user.hangup._lastGainTime),
-            trace: 'Resets idle timer so next gain only counts time since this gain',
-            impact: 'Stale _lastGainTime → double-reward or zero-reward on next gain',
-            fix: 'Check _lastGainTime assignment before save'
-        }
-    );
-
-    ctx.logger.invariantCheck(
-        '_changeInfo._items values are NEW TOTALS not deltas',
-        true,
-        {
-            context: 'HANGUP-GAIN',
-            expect: '_num = currentTotal + accumulatedReward',
-            actual: 'verified in build loop: newTotal = currentNum + totalReward',
-            trace: 'L233992: getBattleAwardItems reads _num as authoritative total',
-            impact: 'Sending deltas → client overwrites totals with small numbers → item loss',
-            fix: 'Ensure newTotal = oldTotal + reward in all branches'
+            trace: 'Resets idle timer for next gain',
+            impact: 'Stale _lastGainTime -> double-reward or zero-reward'
         }
     );
 
@@ -584,14 +701,16 @@ function handleHangupGain(request, ctx) {
     ctx.logger.summaryCard({
         title: 'HANGUP GAIN',
         userId: userId,
-        fields: 4,
-        lesson: curLess,
+        elapsed: elapsedSeconds + 's',
         ticks: exCount,
-        rewards: rewardIndex,
+        items: Object.keys(changeItems).length,
+        lesson: curLess,
         vipLevel: vipLevel,
-        globalWarBuff: globalWarBuff,
         bonusMultiplier: bonusMultiplier,
-        isFirstGain: isFirstGain
+        detRewards: detRewardLog.length,
+        randomDrops: randomDropLog.length,
+        firstBonus: firstBonusLog.length,
+        levelUp: levelChanged ? (oldLevel + '->' + newLevel) : 'none'
     });
 
     return ctx.buildDataResponse(0, responseData);
