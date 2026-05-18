@@ -158,6 +158,18 @@
  *   FIX: Send _team: {} (empty object) for new users
  *     Client iterates {} → pushes nothing → o._team = [] → tutorial teaches placement correctly
  *   EVIDENCE: Critical Fields Audit caught this: lastTeam[9]._team = {1} HERO PRE-PLACED!
+ *
+ * [FIX-014] curMainTask empty for new users → main task icon MISSING in lobby
+ *   TRACE: UserDataParser.setMainTask → iterates e.curMainTask → renders task icon in lobby
+ *     The main task icon is a small UI element that the tutorial guide system points to.
+ *     Without it, the tutorial hand/arrow points to nothing → guide appears broken.
+ *   CAUSE: Server sent curMainTask: {} (empty) → client has no task data → no icon rendered
+ *   EVIDENCE: HAR enterGame response: curMainTask: { "6002": { "_id": 6002, "_curCount": 10102,
+ *     "_targetCount": 10103, "_state": 1 } }
+ *     task.json confirms: task 6001 is first task (levelNeeded=1, taskType="lesson", taskPara1=10102)
+ *   FIX: Load task.json, find first main task where levelNeeded <= user level,
+ *     populate curMainTask with: { [taskId]: { _id, _curCount: 0, _targetCount: taskPara1, _state: 1 } }
+ *     For new level-1 user → task 6001, _curCount=0, _targetCount=10102, _state=1
  */
 
 // ─── Currency/Attribute IDs — main.min.js L82352-82360 ───
@@ -616,12 +628,14 @@ function buildNewUserData(userId, request, ctx) {
     const constant = (ctx.constantJson && ctx.constantJson['1']) ? ctx.constantJson['1'] : {};
     const heroRes = ctx.heroJson || {};
     const summonRes = ctx.summonJson || {};
+    const taskRes = ctx.loadResource('task') || {};
 
     ctx.logger.log('DEBUG', 'ENTER', '[BUILD] Resource JSONs loaded');
     ctx.logger.details('resources',
         ['constantKeys', String(Object.keys(constant).length)],
         ['heroEntries', String(Object.keys(heroRes).length)],
-        ['summonPools', String(Object.keys(summonRes).length)]
+        ['summonPools', String(Object.keys(summonRes).length)],
+        ['taskEntries', String(Object.keys(taskRes).length)]
     );
 
     // ─── Starter hero config ───
@@ -1211,7 +1225,46 @@ function buildNewUserData(userId, request, ctx) {
         },
 
         // ═══ 35. curMainTask — UserInfoSingleton.setMianTask ═══
-        curMainTask: {},
+        // [FIX-014] curMainTask empty for new users → task icon MISSING in lobby
+        //   CAUSE: Client reads e.curMainTask in setMainTask() to render main task UI.
+        //     Empty {} → no task icon → tutorial guide hand points to nothing.
+        //   EVIDENCE: HAR enterGame response shows curMainTask with initial task data:
+        //     { "6002": { "_id": 6002, "_curCount": 10102, "_targetCount": 10103, "_state": 1 } }
+        //   TRACE: UserDataParser.setMainTask → iterates e.curMainTask → renders task icon in lobby
+        //   FORMAT: { [taskId]: { _id, _curCount, _targetCount, _state } }
+        //     _id = task ID from task.json
+        //     _curCount = current progress (for lesson type: lesson ID completed)
+        //     _targetCount = task.json taskPara1 (target lesson/completion value)
+        //     _state = 1 (in progress) or 2 (completed)
+        //     _condition = optional, used for non-lesson tasks (e.g. hero level threshold)
+        //   FIX: Load task.json, find first task (6001, levelNeeded=1), populate curMainTask
+        //     For new user at level 1, start with task 6001, _curCount=0, _state=1
+        curMainTask: (function() {
+            var initialTask = null;
+            var taskIds = Object.keys(taskRes).map(Number).sort(function(a, b) { return a - b; });
+            for (var i = 0; i < taskIds.length; i++) {
+                var t = taskRes[taskIds[i]];
+                if (t && t.type === 'main' && (t.levelNeeded || 0) <= startUserLevel) {
+                    initialTask = t;
+                    break;
+                }
+            }
+            if (!initialTask) {
+                ctx.logger.log('WARN', 'ENTER', '[BUILD] No main task found in task.json for level ' + startUserLevel + ' — curMainTask remains empty');
+                return {};
+            }
+            var taskId = String(initialTask.id);
+            var taskData = {
+                _id: initialTask.id,
+                _curCount: 0,
+                _targetCount: initialTask.taskPara1,
+                _state: 1
+            };
+            ctx.logger.log('DEBUG', 'ENTER', '[BUILD] Initial main task: id=' + taskId + ' type=' + initialTask.taskType + ' target=' + initialTask.taskPara1);
+            var result = {};
+            result[taskId] = taskData;
+            return result;
+        })(),
 
         // ═══ 36. summonLog — SummonSingleton.setSummomLogList ═══
         // Traced: if(e.summonLog) iterate → new SummonLog.deserialize
