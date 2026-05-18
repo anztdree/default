@@ -61,6 +61,20 @@
  *   - 35 calls captured, 31 returned identical 12-activity response
  *   - All 12 activities verified with correct fields, types, and values
  *
+ * ═══════════════════════════════════════════════════════════════
+ * BUG FIX LOG
+ * ═══════════════════════════════════════════════════════════════
+ *
+ * [FIX-013] Response missing request echo fields
+ *   CAUSE: Response was { _acts: acts } but HAR shows real server
+ *     always includes type, action, userId, version in response data.
+ *   EVIDENCE: HAR Entry 2 — top-level keys: ["type","action","userId","version","_acts"]
+ *     Our response only had ["_acts"].
+ *   FIX: Add request.type, request.action, request.userId, request.version to responseData.
+ *   NOTE: Client reads t._acts directly (ts.processHandler unwraps), so missing
+ *     fields don't break _acts access, but protocol must match HAR exactly.
+ *
+ * ═══════════════════════════════════════════════════════════════
  * STRICT RULES: NO STUB, OVERRIDE, FORCE, BYPASS, DUMMY, ASUMSI
  */
 
@@ -659,8 +673,19 @@ function handleGetActivityBrief(request, ctx) {
         );
     }
 
-    // ─── Build response: _acts as OBJECT keyed by id ───
-    return ctx.buildDataResponse(0, { _acts: acts });
+    // ─── Build response ───
+    // [FIX-013] Echo request fields in response (HAR verified)
+    var responseData = {
+        type: request.type,
+        action: request.action,
+        userId: request.userId,
+        version: request.version || '1.0',
+        _acts: acts
+    };
+
+    ctx.logger.responseSnapshot('ACTIVITY BRIEF ret=0', responseData);
+
+    return ctx.buildDataResponse(0, responseData);
 }
 
 module.exports = handleGetActivityBrief;
