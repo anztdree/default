@@ -85,7 +85,10 @@
  *   NEW: use nextID from config (natural progression)
  *
  * [FIX-006] Tutorial vs regular separation
- *   Tutorial: always win, use tutorialLesson from constant.json
+ *   Tutorial: always win, use curLess from userData (same as regular)
+ *   The tutorialLesson list (10101,10102) is ONLY used by CLIENT for OverScene display
+ *   (musicName, chaterID), NOT for server-side lesson lookup. Server must always
+ *   use the actual curLess to read correct rewards and nextID from lesson.json.
  *   Regular: respect checkResult, use actual curLess from user data
  *
  * STRICT RULES: NO STUB, OVERRIDE, FORCE, BYPASS, DUMMY, ASUMSI
@@ -186,7 +189,7 @@ function handleCheckBattleResult(request, ctx) {
     if (isGuide) {
         isWin = true;
         ctx.logger.details('outcome',
-            ['mode', 'TUTORIAL (forced win)'],
+            ['mode', 'TUTORIAL (always win — design)'],
             ['isGuide', 'true']
         );
     } else {
@@ -215,16 +218,14 @@ function handleCheckBattleResult(request, ctx) {
     ctx.logger.step(5, 5, 'Build response', 'running');
 
     // Determine which lesson config to use
-    // For tutorial: use the current tutorialLesson from constant.json
-    // For regular: use the lesson the player is currently on
-    let lessonId;
-    if (isGuide) {
-        // Tutorial: use first tutorial lesson (10101)
-        // Player progresses through tutorialLesson list
-        lessonId = String(tutorialLessons[0]);
-    } else {
-        lessonId = String(curLess);
-    }
+    // CRITICAL FIX: BOTH tutorial and regular must use curLess from userData.
+    // The tutorialLesson list (constant.json) is ONLY used client-side for:
+    //   - OverScene musicName (L104907: SoundManager.getLesson(h))
+    //   - OverScene chaterID (L104903: chaterID: 1 or 2)
+    // Server must ALWAYS use curLess to get correct rewards and nextID chain.
+    // BUG: old code used tutorialLessons[0] (=10101) for ALL tutorial battles,
+    // causing stage 1-2 to re-read lesson 10101 → nextID=10102 → stuck at 10102.
+    let lessonId = String(curLess);
 
     const lessonConfig = lessonData[lessonId];
     if (!lessonConfig) {
@@ -323,6 +324,7 @@ function handleCheckBattleResult(request, ctx) {
         const nextLessonId = lessonConfig.nextID;
         const nextChapter = lessonConfig.nextChapter;
         const thisChapter = lessonConfig.thisChapter;
+        const completedLessonId = parseInt(lessonId);
 
         if (nextLessonId) {
             // There is a next lesson — advance
@@ -331,7 +333,10 @@ function handleCheckBattleResult(request, ctx) {
         // else: this is the last lesson (endpoint like 17417), stay here
 
         // Update maxPassLesson: highest lesson ID ever passed
-        maxPassLesson = Math.max(maxPassLesson, parseInt(lessonId));
+        // CRITICAL: compare against completedLessonId (lesson JUST won), NOT curLess (already advanced)
+        // BUG: old code used parseInt(curLess) after curLess was already changed to nextLessonId,
+        // causing maxPassLesson to track the NEXT lesson instead of the completed one.
+        maxPassLesson = Math.max(maxPassLesson, completedLessonId);
 
         // Update maxPassChapter: highest chapter ever passed
         if (thisChapter) {
@@ -339,7 +344,8 @@ function handleCheckBattleResult(request, ctx) {
         }
 
         ctx.logger.details('progression',
-            ['curLess', String(curLess)],
+            ['lessonId (completed)', String(lessonId)],
+            ['curLess (new)', String(curLess)],
             ['maxPassLesson', String(maxPassLesson)],
             ['maxPassChapter', String(maxPassChapter)],
             ['nextLessonId', String(nextLessonId || '(endpoint)')],
@@ -395,7 +401,7 @@ function handleCheckBattleResult(request, ctx) {
             value: String(battleResult),
             status: 'ok',
             detail: isGuide
-                ? 'L104882: 0 == e._battleResult -> true (tutorial forced win)'
+                ? 'L104882: 0 == e._battleResult -> true (tutorial always win)'
                 : 'L97750: 0 == t._battleResult ? true : false (regular battle)'
         },
         {
