@@ -407,48 +407,167 @@ function handleHeroGetAttrs(request, ctx) {
             { id: ATTR.HEALER_PLUS, num: baseStats.healerPlus },
         ]) };
 
-        // ─── BUILD _attrs[i] (total attributes) ───
-        // Total attrs = base attrs + all bonuses (equip, skill, qigong, etc.)
-        // For now: total = base (since no equipment/breakthrough system yet)
-        // L133802: setTotalAttrs iterates _totalAttr._items
-        //   if id==21: heroBaseAttr.power = floor(num)
-        // All flat combat stats from hero.json (L116073), NOT hardcoded 0
+        // ─── [FIX-005] BUILD _attrs[i] (total attributes) with talent + equipment + suit ───
+        // Total attrs = base × talent + equipment + suit bonuses
+        // _baseAttrs remains base-only (client applies talent to baseAttrs itself)
+        // Formula verified via HAR: totalHP = baseHP × talent + equipHP = 1240 × 0.6 + 4906 = 5650
+        const heroJsonLocal = ctx.loadResource('hero');
+        const heroConfigLocal = heroJsonLocal ? heroJsonLocal[String(heroDisplayId)] : null;
+        const talent = heroConfigLocal ? (heroConfigLocal.talent || 0) : 0;
+
+        // Start total from base, apply talent multiply to HP/ATK
+        const totalStats = Object.assign({}, baseStats);
+        totalStats.hp = Math.floor(baseStats.hp * talent);
+        totalStats.attack = Math.floor(baseStats.attack * talent);
+
+        // Initialize bonus attr fields
+        totalStats.hpPercent = 0;
+        totalStats.armorPercent = 0;
+        totalStats.attackPercent = 0;
+        totalStats.extraArmor = 0;
+        totalStats.superDamage = 0;
+        totalStats.shielderPlus = 0;
+        totalStats.damageUp = 0;
+        totalStats.damageDown = 0;
+        totalStats.superDamageResist = 0;
+
+        // Load equipment data and add bonuses
+        const equipData = userData.equip && userData.equip._suits && userData.equip._suits[heroId];
+        if (equipData && equipData._suitItems && equipData._suitItems.length > 0) {
+            const equipJson = ctx.loadResource('equip');
+            const equipSuitJson = ctx.loadResource('equipSuit');
+
+            if (equipJson && equipSuitJson) {
+                // Mapping: attr ID → totalStats property name
+                const attrToStat = {
+                    0: 'hp', 1: 'attack', 2: 'armor', 3: 'speed', 4: 'hit',
+                    5: 'dodge', 6: 'block', 7: 'blockEffect', 8: 'skillDamage',
+                    9: 'critical', 10: 'criticalResist', 11: 'criticalDamage',
+                    12: 'armorBreak', 13: 'damageReduce', 14: 'controlResist',
+                    15: 'trueDamage', 17: 'hpPercent', 18: 'armorPercent',
+                    19: 'attackPercent', 23: 'superDamage', 24: 'healPlus',
+                    25: 'healerPlus', 26: 'extraArmor', 27: 'shielderPlus',
+                    28: 'damageUp', 29: 'damageDown', 31: 'superDamageResist',
+                };
+
+                // Collect and apply equipment bonuses
+                for (const suitItem of equipData._suitItems) {
+                    const eqConfig = equipJson[String(suitItem._id)];
+                    if (!eqConfig) continue;
+                    for (let a = 1; a <= 3; a++) {
+                        const abilityId = eqConfig['abilityID' + a];
+                        const value = eqConfig['value' + a];
+                        if (abilityId != null && abilityId !== '' && value != null) {
+                            const id = typeof abilityId === 'number' ? abilityId : parseInt(abilityId);
+                            if (!isNaN(id)) {
+                                const statName = attrToStat[id];
+                                if (statName) {
+                                    totalStats[statName] = (totalStats[statName] || 0) + value;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Collect and apply suit bonuses
+                const equippedIds = equipData._suitItems.map(item => String(item._id));
+                const idSet = new Set(equippedIds);
+                for (const suitId in equipSuitJson) {
+                    const suit = equipSuitJson[suitId];
+                    if (!suit.suitInclude) continue;
+                    const suitIncludes = suit.suitInclude.split(',');
+                    const matchCount = suitIncludes.filter(id => idSet.has(id)).length;
+
+                    for (let tier = 1; tier <= 3; tier++) {
+                        const needed = suit['activeNeeded' + tier];
+                        if (needed === undefined || matchCount < needed) continue;
+                        for (let a = 1; a <= 2; a++) {
+                            const aid = suit['abilityID' + tier + a];
+                            const val = suit['value' + tier + a];
+                            if (aid != null && aid !== '' && val != null) {
+                                const id = typeof aid === 'number' ? aid : parseInt(aid);
+                                if (!isNaN(id)) {
+                                    const statName = attrToStat[id];
+                                    if (statName) {
+                                        totalStats[statName] = (totalStats[statName] || 0) + val;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Update ORG_HP after all bonuses applied
+        totalStats.orgHp = totalStats.hp;
+
+        // [FIX-006] Recalculate power based on TOTAL stats (after talent + equipment + suit)
+        // Power was calculated from base-only stats in calculateHeroBaseAttrs — must be recalculated
+        const heroPowerJson = ctx.loadResource('heroPower');
+        if (heroPowerJson && heroConfigLocal) {
+            const attrNameMap = {
+                hp: totalStats.hp, attack: totalStats.attack, armor: totalStats.armor,
+                speed: totalStats.speed, extraArmor: totalStats.extraArmor,
+                hit: totalStats.hit, dodge: totalStats.dodge, block: totalStats.block,
+                blockEffect: totalStats.blockEffect, skillDamage: totalStats.skillDamage,
+                superDamage: totalStats.superDamage, critical: totalStats.critical,
+                criticalResist: totalStats.criticalResist, criticalDamage: totalStats.criticalDamage,
+                armorBreak: totalStats.armorBreak, damageReduce: totalStats.damageReduce,
+                controlResist: totalStats.controlResist, trueDamage: totalStats.trueDamage,
+                healPlus: totalStats.healPlus, healerPlus: totalStats.healerPlus,
+                shielderPlus: totalStats.shielderPlus, damageUp: totalStats.damageUp,
+                damageDown: totalStats.damageDown, superDamageResist: totalStats.superDamageResist,
+                hpPercent: totalStats.hpPercent, attackPercent: totalStats.attackPercent,
+                armorPercent: totalStats.armorPercent,
+            };
+            let totalPower = 0;
+            for (const key in heroPowerJson) {
+                const entry = heroPowerJson[key];
+                if (entry.heroType === heroConfigLocal.heroType) {
+                    totalPower += (attrNameMap[entry.attName] || 0) * entry.powerParam;
+                }
+            }
+            totalStats.power = Math.floor(totalPower);
+        }
+
+        // Build _attrs[i] from totalStats (total = base × talent + equipment + suit)
         attrs[i] = { _items: buildItems([
-            { id: ATTR.HP, num: baseStats.hp },
-            { id: ATTR.ATTACK, num: baseStats.attack },
-            { id: ATTR.ARMOR, num: baseStats.armor },
-            { id: ATTR.SPEED, num: baseStats.speed },
-            { id: ATTR.TALENT, num: baseStats.talent },
-            { id: ATTR.ENERGY_MAX, num: baseStats.energyMax },
-            { id: ATTR.POWER, num: baseStats.power },
+            { id: ATTR.HP, num: totalStats.hp },
+            { id: ATTR.ATTACK, num: totalStats.attack },
+            { id: ATTR.ARMOR, num: totalStats.armor },
+            { id: ATTR.SPEED, num: totalStats.speed },
+            { id: ATTR.TALENT, num: totalStats.talent },
+            { id: ATTR.ENERGY_MAX, num: totalStats.energyMax },
+            { id: ATTR.POWER, num: totalStats.power },
             // Flat combat stats from hero.json (L116073)
-            { id: ATTR.HIT, num: baseStats.hit },
-            { id: ATTR.DODGE, num: baseStats.dodge },
-            { id: ATTR.BLOCK, num: baseStats.block },
-            { id: ATTR.BLOCK_EFFECT, num: baseStats.blockEffect },
-            { id: ATTR.SKILL_DAMAGE, num: baseStats.skillDamage },
-            { id: ATTR.CRITICAL, num: baseStats.critical },
-            { id: ATTR.CRITICAL_RESIST, num: baseStats.criticalResist },
-            { id: ATTR.CRITICAL_DAMAGE, num: baseStats.criticalDamage },
-            { id: ATTR.ARMOR_BREAK, num: baseStats.armorBreak },
-            { id: ATTR.DAMAGE_REDUCE, num: baseStats.damageReduce },
-            { id: ATTR.CONTROL_RESIST, num: baseStats.controlResist },
-            { id: ATTR.TRUE_DAMAGE, num: baseStats.trueDamage },
-            { id: ATTR.HEAL_PLUS, num: baseStats.healPlus },
-            { id: ATTR.HEALER_PLUS, num: baseStats.healerPlus },
-            // Bonus attrs (equipment/breakthrough/qigong — not implemented yet)
+            { id: ATTR.HIT, num: totalStats.hit },
+            { id: ATTR.DODGE, num: totalStats.dodge },
+            { id: ATTR.BLOCK, num: totalStats.block },
+            { id: ATTR.BLOCK_EFFECT, num: totalStats.blockEffect },
+            { id: ATTR.SKILL_DAMAGE, num: totalStats.skillDamage },
+            { id: ATTR.CRITICAL, num: totalStats.critical },
+            { id: ATTR.CRITICAL_RESIST, num: totalStats.criticalResist },
+            { id: ATTR.CRITICAL_DAMAGE, num: totalStats.criticalDamage },
+            { id: ATTR.ARMOR_BREAK, num: totalStats.armorBreak },
+            { id: ATTR.DAMAGE_REDUCE, num: totalStats.damageReduce },
+            { id: ATTR.CONTROL_RESIST, num: totalStats.controlResist },
+            { id: ATTR.TRUE_DAMAGE, num: totalStats.trueDamage },
+            { id: ATTR.HEAL_PLUS, num: totalStats.healPlus },
+            { id: ATTR.HEALER_PLUS, num: totalStats.healerPlus },
+            // Bonus attrs from equipment + suit                                    [FIX-005]
             { id: ATTR.ENERGY, num: 0 },
-            { id: ATTR.HP_PERCENT, num: 0 },
-            { id: ATTR.ARMOR_PERCENT, num: 0 },
-            { id: ATTR.ATTACK_PERCENT, num: 0 },
+            { id: ATTR.HP_PERCENT, num: totalStats.hpPercent || 0 },           // [FIX-005] Equipment/suit bonus
+            { id: ATTR.ARMOR_PERCENT, num: totalStats.armorPercent || 0 },     // [FIX-005] Equipment/suit bonus
+            { id: ATTR.ATTACK_PERCENT, num: totalStats.attackPercent || 0 },   // [FIX-005] Equipment/suit bonus
             { id: ATTR.SPEED_PERCENT, num: 0 },
-            { id: ATTR.ORG_HP, num: 0 },
-            { id: ATTR.SUPER_DAMAGE, num: 0 },
-            { id: ATTR.EXTRA_ARMOR, num: 0 },
-            { id: ATTR.SHIELDER_PLUS, num: 0 },
-            { id: ATTR.DAMAGE_UP, num: 0 },
-            { id: ATTR.DAMAGE_DOWN, num: 0 },
-            { id: ATTR.SUPER_DAMAGE_RESIST, num: 0 },
+            { id: ATTR.ORG_HP, num: totalStats.orgHp || 0 },                   // [FIX-005] = total HP after talent+equip
+            { id: ATTR.SUPER_DAMAGE, num: totalStats.superDamage || 0 },       // [FIX-005] Equipment bonus
+            { id: ATTR.EXTRA_ARMOR, num: totalStats.extraArmor || 0 },         // [FIX-005] Equipment bonus
+            { id: ATTR.SHIELDER_PLUS, num: totalStats.shielderPlus || 0 },     // [FIX-005] Equipment/suit bonus
+            { id: ATTR.DAMAGE_UP, num: totalStats.damageUp || 0 },             // [FIX-005] Equipment/suit bonus
+            { id: ATTR.DAMAGE_DOWN, num: totalStats.damageDown || 0 },         // [FIX-005] Equipment/suit bonus
+            { id: ATTR.SUPER_DAMAGE_RESIST, num: totalStats.superDamageResist || 0 }, // [FIX-005] Equipment/suit bonus
         ]) };
     }
 
