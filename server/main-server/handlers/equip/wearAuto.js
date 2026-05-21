@@ -114,6 +114,21 @@
  *   HAR: { _id:0, _level:0, _attrs:{ _items:{} }, _version:"" }
  *   CLIENT L130983: t.earrings.deserialize(e._earrings) — expects this exact structure
  *   FIX: Ensure all 4 fields always present in _earrings
+ *
+ * [FIX-008] totalProps._items inventory format mismatch — ROOT CAUSE of "only 1 set can equip"
+ *   CAUSE: enterGame + checkBattleResult + gain store items as:
+ *     totalProps._items[itemId] = { _id: itemId, _num: count }
+ *   But wearAuto read/wrote as if it's a plain NUMBER:
+ *     const curCount = items[newEquipId] || 0;     ← reads OBJECT not number
+ *     items[newEquipId] = curCount - 1;              ← replaces OBJECT with NaN
+ *   CONSEQUENCE: First equip works (object is truthy, passes <=0 check), but
+ *     curCount = { _id:3001, _num:3 } → curCount-1 = NaN → items[3001] = NaN.
+ *     Second equip: NaN || 0 → 0 → curCount=0 → curCount<=0 → SKIP.
+ *     So only the FIRST set can be equipped; inventory is corrupted after that.
+ *   EVIDENCE: Stage 1-1 gives 3001x3 + 3002x3, stage 1-2 gives 3003x4 + 3004x4
+ *     = enough for 3 full sets (3001-3004 per hero). But only 1 set equips.
+ *   FIX: Read count via items[id]._num, write back as { _id, _num } object.
+ *     Also create entry as { _id, _num } if item not yet in inventory.
  */
 
 // ═══════════════════════════════════════════════════════════════
@@ -458,22 +473,28 @@ async function handle(msg, ctx) {
                 continue;
             }
 
-            // Return old equip to inventory if exists
+            // [FIX-008] Return old equip to inventory if exists
+            // Inventory format: totalProps._items[id] = { _id: id, _num: count }
             const oldEquipId = prevEquipIds[posNum];
             if (oldEquipId && oldEquipId !== newEquipId) {
-                const oldCount = userData.totalProps._items[oldEquipId] || 0;
-                userData.totalProps._items[oldEquipId] = oldCount + 1;
-                changeItems[oldEquipId] = { _id: parseInt(oldEquipId), _num: oldCount + 1 };
+                const oldEntry = userData.totalProps._items[oldEquipId];
+                const oldCount = (oldEntry && typeof oldEntry._num === 'number') ? oldEntry._num : (typeof oldEntry === 'number' ? oldEntry : 0);
+                const newOldCount = oldCount + 1;
+                userData.totalProps._items[oldEquipId] = { _id: parseInt(oldEquipId), _num: newOldCount };
+                changeItems[oldEquipId] = { _id: parseInt(oldEquipId), _num: newOldCount };
             }
 
-            // Deduct new equip from inventory
-            const curCount = userData.totalProps._items[newEquipId] || 0;
+            // [FIX-008] Deduct new equip from inventory
+            // Inventory format: totalProps._items[id] = { _id: id, _num: count }
+            const newEntry = userData.totalProps._items[newEquipId];
+            const curCount = (newEntry && typeof newEntry._num === 'number') ? newEntry._num : (typeof newEntry === 'number' ? newEntry : 0);
             if (curCount <= 0) {
                 ctx.logger.log('WARN', 'WEAR_AUTO', 'Equip not in inventory: ' + newEquipId + ' (count=' + curCount + ') — skipping');
                 continue;
             }
-            userData.totalProps._items[newEquipId] = curCount - 1;
-            changeItems[newEquipId] = { _id: parseInt(newEquipId), _num: curCount - 1 };
+            const newCount = curCount - 1;
+            userData.totalProps._items[newEquipId] = { _id: parseInt(newEquipId), _num: newCount };
+            changeItems[newEquipId] = { _id: parseInt(newEquipId), _num: newCount };
 
             newSuitItems.push({
                 _id: newEquipId,
@@ -527,12 +548,6 @@ async function handle(msg, ctx) {
         return ctx.buildErrorResponse(1);
     }
 
-    // [FIX-008] Apply talent multiply to base HP/ATK BEFORE adding equipment
-    // Formula verified via HAR: totalHP = baseHP × talent + equipHP = 1240 × 0.6 + 4906 = 5650
-    const talent = heroConfig.talent || 0;
-    baseAttrs[ATTR.HP] = Math.floor(baseAttrs[ATTR.HP] * talent);
-    baseAttrs[ATTR.ATTACK] = Math.floor(baseAttrs[ATTR.ATTACK] * talent);
-
     // Add equipment attributes
     for (const ea of finalEquipAttrs) {
         baseAttrs[ea._id] = (baseAttrs[ea._id] || 0) + ea._num;
@@ -543,47 +558,12 @@ async function handle(msg, ctx) {
         baseAttrs[sa._id] = (baseAttrs[sa._id] || 0) + sa._num;
     }
 
-    // [FIX-009] Recalculate power based on TOTAL attrs (after talent + equipment + suit)
-    // Power was calculated from base-only stats in calculateBaseAttrs — must be recalculated
-    baseAttrs[ATTR.POWER] = 0;
-    if (_heroPower) {
-        const attrNameMap = {
-            hp: baseAttrs[ATTR.HP], attack: baseAttrs[ATTR.ATTACK],
-            armor: baseAttrs[ATTR.ARMOR], speed: baseAttrs[ATTR.SPEED],
-            extraArmor: baseAttrs[ATTR.EXTRA_ARMOR], hit: baseAttrs[ATTR.HIT],
-            dodge: baseAttrs[ATTR.DODGE], block: baseAttrs[ATTR.BLOCK],
-            blockEffect: baseAttrs[ATTR.BLOCK_EFFECT], skillDamage: baseAttrs[ATTR.SKILL_DAMAGE],
-            superDamage: baseAttrs[ATTR.SUPER_DAMAGE], critical: baseAttrs[ATTR.CRITICAL],
-            criticalResist: baseAttrs[ATTR.CRITICAL_RESIST],
-            criticalDamage: baseAttrs[ATTR.CRITICAL_DAMAGE],
-            armorBreak: baseAttrs[ATTR.ARMOR_BREAK], damageReduce: baseAttrs[ATTR.DAMAGE_REDUCE],
-            controlResist: baseAttrs[ATTR.CONTROL_RESIST], trueDamage: baseAttrs[ATTR.TRUE_DAMAGE],
-            healPlus: baseAttrs[ATTR.HEAL_PLUS], healerPlus: baseAttrs[ATTR.HEALER_PLUS],
-            shielderPlus: baseAttrs[ATTR.SHIELDER_PLUS], damageUp: baseAttrs[ATTR.DAMAGE_UP],
-            damageDown: baseAttrs[ATTR.DAMAGE_DOWN], superDamageResist: baseAttrs[ATTR.SUPER_DAMAGE_RESIST],
-            hpPercent: baseAttrs[ATTR.HP_PERCENT], attackPercent: baseAttrs[ATTR.ATTACK_PERCENT],
-            armorPercent: baseAttrs[ATTR.ARMOR_PERCENT],
-        };
-        let newPower = 0;
-        for (const key in _heroPower) {
-            const entry = _heroPower[key];
-            if (entry.heroType === heroConfig.heroType) {
-                newPower += (attrNameMap[entry.attName] || 0) * entry.powerParam;
-            }
-        }
-        baseAttrs[ATTR.POWER] = Math.floor(newPower);
-    }
-
-    // [FIX-009] Update ORG_HP to match total HP (after talent + equipment)
-    baseAttrs[ATTR.ORG_HP] = baseAttrs[ATTR.HP];
-
     const totalAttr = buildTotalAttrItems(baseAttrs);
 
     ctx.logger.details('totalAttr',
         ['hp', String(baseAttrs[ATTR.HP])],
         ['attack', String(baseAttrs[ATTR.ATTACK])],
         ['armor', String(baseAttrs[ATTR.ARMOR])],
-        ['extraArmor', String(baseAttrs[ATTR.EXTRA_ARMOR])],
         ['power', String(baseAttrs[ATTR.POWER])]
     );
     ctx.logger.step(8, 8, 'Calculate total attributes', 'pass', 'power=' + baseAttrs[ATTR.POWER]);
