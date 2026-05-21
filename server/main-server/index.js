@@ -223,6 +223,9 @@ const heroQualityParamJson = loadResource('heroQualityParam');
 // heroPower.json: 31 attr weights per heroType for combat power formula
 const heroPowerJson = loadResource('heroPower');
 
+// Pre-load heroQualityPower config (quality powerParam multiplier, all 1.0 currently)
+const heroQualityPowerJson = loadResource('heroQualityPower');
+
 // Pre-load zPower config (used by zPower cost feature — L84802)
 const zPowerQualityParaJson = loadResource('zPowerQualityPara');
 
@@ -971,6 +974,7 @@ logger.table([
     ['heroLevelAttr.json', heroLevelAttrJson ? chalk.green(`${Object.keys(heroLevelAttrJson).length} entries`) : chalk.yellow('MISSING')],
     ['heroTypeParam.json', heroTypeParamJson ? chalk.green(`${Object.keys(heroTypeParamJson).length} entries`) : chalk.yellow('MISSING')],
     ['heroQualityParam.json', heroQualityParamJson ? chalk.green(`${Object.keys(heroQualityParamJson).length} entries`) : chalk.yellow('MISSING')],
+    ['heroQualityPower.json', heroQualityPowerJson ? chalk.green(`${Object.keys(heroQualityPowerJson).length} entries`) : chalk.yellow('MISSING')],
     ['zPowerQualityPara.json', zPowerQualityParaJson ? chalk.green(`${Object.keys(zPowerQualityParaJson).length} entries`) : chalk.yellow('MISSING')],
     ['heroPower.json', heroPowerJson ? chalk.green(`${Object.keys(heroPowerJson).length} entries`) : chalk.red('MISSING')]
 ]);
